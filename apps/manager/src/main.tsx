@@ -140,6 +140,9 @@ function ManagerApp() {
   const [captureError, setCaptureError] = useState<string | null>(null);
   const [captureLastUpdated, setCaptureLastUpdated] = useState<Date | null>(null);
   const [captureRefreshing, setCaptureRefreshing] = useState(false);
+  const [activeCaptureAudio, setActiveCaptureAudio] = useState<{ id: string; url: string } | null>(null);
+  const [captureAudioLoading, setCaptureAudioLoading] = useState<string | null>(null);
+  const [capturePlaybackError, setCapturePlaybackError] = useState<string | null>(null);
   const dialogRef = useRef<HTMLElement | null>(null);
   const dialogCloseRef = useRef<HTMLButtonElement | null>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
@@ -170,14 +173,30 @@ function ManagerApp() {
   }, []);
 
   useEffect(() => {
-    if (view !== 'visits') return;
     void refreshFieldCaptures();
     const timer = window.setInterval(() => void refreshFieldCaptures(), 30_000);
     return () => window.clearInterval(timer);
-  }, [view, refreshFieldCaptures]);
+  }, [refreshFieldCaptures]);
 
-  const territories = useMemo(() => [...new Set(demoConversations.map((item) => item.territoryName))].sort(), []);
-  const representatives = useMemo(() => [...new Set(demoConversations.map((item) => item.representativeName))].sort(), []);
+  const territories = useMemo(() => [...new Set([
+    ...demoConversations.map((item) => item.territoryName),
+    ...fieldCaptures.map((item) => item.territoryId)
+  ])].sort(), [fieldCaptures]);
+  const representatives = useMemo(() => [...new Set([
+    ...demoConversations.map((item) => item.representativeName),
+    ...fieldCaptures.map((item) => item.representativeId)
+  ])].sort(), [fieldCaptures]);
+  const filteredFieldCaptures = useMemo(() => {
+    const cutoff = period === 'all' ? 0 : Date.now() - Number(period) * 86_400_000;
+    const query = search.trim().toLowerCase();
+    return fieldCaptures.filter((item) => {
+      if (Date.parse(item.startedAt) < cutoff) return false;
+      if (territory !== 'all' && item.territoryId !== territory) return false;
+      if (representative !== 'all' && item.representativeId !== representative) return false;
+      if (query && !`${item.outletName} ${item.representativeId} ${item.territoryId} ${item.id}`.toLowerCase().includes(query)) return false;
+      return true;
+    });
+  }, [fieldCaptures, period, territory, representative, search]);
   const conversations = useMemo(() => {
     const cutoffDate = period === 'all' ? '0000-01-01' : shiftDateKey(demoAsOfDate, 1 - Number(period));
     const query = search.trim().toLowerCase();
@@ -465,11 +484,49 @@ function ManagerApp() {
     if (evidenceVisit) openVisit(evidenceVisit.id);
   }
 
+  async function toggleCaptureAudio(recordingId: string) {
+    if (activeCaptureAudio?.id === recordingId) {
+      setActiveCaptureAudio(null);
+      return;
+    }
+    setCaptureAudioLoading(recordingId);
+    setCapturePlaybackError(null);
+    try {
+      const link = await captureApi.getRecordingDownloadUrl(recordingId);
+      setActiveCaptureAudio({ id: recordingId, url: link.url });
+    } catch (error) {
+      setCapturePlaybackError(error instanceof Error ? error.message : 'The uploaded audio link could not be created.');
+    } finally {
+      setCaptureAudioLoading(null);
+    }
+  }
+
+  function renderLiveCapturePreview() {
+    const recent = filteredFieldCaptures.slice(0, 4);
+    return <section className="live-capture-preview" aria-labelledby="live-capture-title" aria-busy={captureRefreshing}>
+      <div className="live-capture-heading"><div><h2 id="live-capture-title">Live field recordings</h2><p>Real PWA captures from the API. They are kept separate from the synthetic conversation charts below.</p></div>
+        <button className="text-action" type="button" onClick={() => setView('visits')}>Open capture history <Icon name="arrow"/></button>
+      </div>
+      {captureApiState === 'unavailable' && <p className="live-capture-empty">The capture API is unavailable. Start the API to see recordings made in the PWA.</p>}
+      {captureApiState === 'loading' && !fieldCaptures.length && <p className="live-capture-empty">Checking for live PWA recordings…</p>}
+      {captureApiState === 'available' && !recent.length && <p className="live-capture-empty">{fieldCaptures.length ? 'No real captures match the selected period, territory, representative, or search.' : 'No real recording has arrived yet. Record and upload one from the Field PWA to hear it here.'}</p>}
+      {capturePlaybackError && <p className="live-capture-error" role="alert">{capturePlaybackError}</p>}
+      {recent.map((recording) => <article className="live-capture-row" key={recording.id}>
+        <div className="live-capture-identity"><strong>{recording.outletName}</strong><span>{recording.representativeId} · {recording.territoryId}</span></div>
+        <div className="live-capture-meta"><time dateTime={recording.startedAt}>{formatDateTime(recording.startedAt)}</time><span>{formatDuration(Math.round(recording.durationSeconds))}</span><span>{syncStateDetails[recording.syncState].label}</span></div>
+        {recording.syncState === 'uploaded'
+          ? <button className="live-audio-button" type="button" onClick={() => void toggleCaptureAudio(recording.id)} disabled={captureAudioLoading === recording.id}>{captureAudioLoading === recording.id ? 'Loading…' : activeCaptureAudio?.id === recording.id ? 'Close audio' : 'Listen to audio'}</button>
+          : <span className={`live-upload-state sync-${recording.syncState}`}>{recording.syncState === 'queued' ? 'Waiting for upload' : recording.syncState === 'uploading' ? 'Uploading' : 'Upload needs attention'}</span>}
+        {activeCaptureAudio?.id === recording.id && <audio className="live-capture-player" controls preload="none" src={activeCaptureAudio.url} aria-label={`Uploaded recording from ${recording.outletName}`}/>}
+      </article>)}
+    </section>;
+  }
+
   function renderFilters() {
     return <div className="report-filters" aria-label="Report filters">
       <label className="sr-only" htmlFor="period-filter">Reporting period</label>
       <select id="period-filter" value={period} onChange={(event) => setPeriod(event.target.value as Period)}>
-        <option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="all">All demo data</option>
+        <option value="7">Last 7 days</option><option value="30">Last 30 days</option><option value="all">All dates</option>
       </select>
       <label className="sr-only" htmlFor="territory-filter">Territory</label>
       <select id="territory-filter" value={territory} onChange={(event) => setTerritory(event.target.value)}>
@@ -483,8 +540,9 @@ function ManagerApp() {
   }
 
   function renderInsights() {
-    if (!conversations.length) return <div className="empty-state"><Icon name="search"/><h2>No conversations match these filters</h2><p>Change the date range or clear a territory, representative, or outlet search.</p><button className="button" onClick={() => { setPeriod('all'); setTerritory('all'); setRepresentative('all'); setSearch(''); }}>Show all demo conversations</button></div>;
+    if (!conversations.length) return <>{renderLiveCapturePreview()}<div className="empty-state"><Icon name="search"/><h2>No synthetic conversations match these filters</h2><p>Live PWA captures remain available above. Change the date range or clear a territory, representative, or outlet search to see the demo report.</p><button className="button" onClick={() => { setPeriod('all'); setTerritory('all'); setRepresentative('all'); setSearch(''); }}>Show all demo conversations</button></div></>;
     return <>
+      {renderLiveCapturePreview()}
       <div className="pulse-strip" aria-label="Field pulse">
         <div className="pulse-item"><span>Analyzed visits</span><strong>{formatCount(analyzedCount)}</strong><small>in selected period</small></div>
         <div className="pulse-item"><span>Unique outlets</span><strong>{formatCount(outletCount)}</strong><small>distinct shopkeepers</small></div>
@@ -495,7 +553,7 @@ function ManagerApp() {
 
       <div className="insight-layout">
         <section className="signal-workspace" aria-label="Conversation signal report">
-          <div className="section-heading"><div><h2>What is surfacing in conversations</h2><p>Distinct visits and mentions are counted separately.</p></div><span className="section-period">{period === '7' ? 'Last 7 days' : period === '30' ? 'Last 30 days' : 'All demo data'}</span></div>
+          <div className="section-heading"><div><h2>What is surfacing in conversations</h2><p>Distinct visits and mentions are counted separately.</p></div><span className="section-period">{period === '7' ? 'Last 7 days' : period === '30' ? 'Last 30 days' : 'All dates'}</span></div>
           {selectedSignal ? <>
             <div className="signal-header">
               <div><span className={`category-tag category-${selectedSignal.category}`}>{categoryLabel(selectedSignal.category)}</span><h3>{selectedSignal.title}</h3><p>{selectedSignal.rawMentionCount} supported mention{selectedSignal.rawMentionCount === 1 ? '' : 's'} from <strong>{selectedSignal.distinctOutletCount} unique outlet{selectedSignal.distinctOutletCount === 1 ? '' : 's'}</strong> across {selectedSignal.territories.length} territor{selectedSignal.territories.length === 1 ? 'y' : 'ies'}.</p></div>
@@ -594,7 +652,7 @@ function ManagerApp() {
   function renderFieldPwaCaptures() {
     return <section className="field-pwa-captures" aria-labelledby="field-pwa-captures-title" aria-busy={captureRefreshing}>
       <div className="field-pwa-header">
-        <div><h2 id="field-pwa-captures-title">Field PWA captures</h2><p>Live API metadata, kept separate from synthetic report totals. Audio and transcripts are not displayed; timestamps use the PWA capture start time.</p></div>
+        <div><h2 id="field-pwa-captures-title">Field PWA captures</h2><p>Real recording metadata and uploaded audio, kept separate from synthetic report totals. Transcripts are not available yet; timestamps use the PWA capture start time.</p></div>
         <div className="field-pwa-actions">
           <span className={`field-pwa-api-status ${captureApiState}`} role="status" aria-live="polite"><i aria-hidden="true"/>{captureApiState === 'loading' ? 'Connecting to API' : captureApiState === 'available' ? 'API connected' : 'API unavailable'}</span>
           <button className="button" type="button" onClick={() => void refreshFieldCaptures()} disabled={captureRefreshing}>{captureRefreshing ? 'Refreshing…' : 'Refresh'}</button>
@@ -602,17 +660,20 @@ function ManagerApp() {
       </div>
       <div className="field-pwa-runtime" aria-label="API capabilities">
         {captureRuntime?.persistence === 'in-memory-demo' && <span>In-memory demo metadata</span>}
-        {captureRuntime?.uploads === 'not-configured' && <span className="field-pwa-upload-unavailable">S3 upload unavailable</span>}
+        {captureRuntime?.uploads === 'not-configured' && <span className="field-pwa-upload-unavailable">S3 upload not configured</span>}
+        {captureRuntime?.uploads === 'configured' && <span className="field-pwa-upload-ready">S3 upload configured</span>}
         {captureRuntime?.analysis === 'not-configured' && <span>Analysis service not configured</span>}
         {captureLastUpdated && <span>Last API response {formatDateTime(captureLastUpdated.toISOString())}</span>}
       </div>
+      {capturePlaybackError && <div className="field-pwa-alert" role="alert">{capturePlaybackError}</div>}
       {captureApiState === 'unavailable' && <div className="field-pwa-alert" role="alert"><strong>Capture API unavailable.</strong><span>{captureError ?? 'The API could not be reached.'}</span>{captureLastUpdated && <small>Showing the last successful metadata response from {formatDateTime(captureLastUpdated.toISOString())}.</small>}</div>}
       {captureApiState === 'loading' && fieldCaptures.length === 0 && <div className="field-pwa-loading" role="status"><i/><i/><span>Loading capture metadata…</span></div>}
-      {captureApiState === 'available' && fieldCaptureTotal === 0 && <div className="field-pwa-empty"><strong>No Field PWA capture metadata has arrived.</strong><span>Records will appear here when the field PWA posts recording metadata to the API.</span></div>}
-      {fieldCaptures.length > 0 && <>
+      {captureApiState === 'available' && fieldCaptures.length === 0 && <div className="field-pwa-empty"><strong>No Field PWA capture metadata has arrived.</strong><span>Record a consented shop visit in the PWA and bring the device online to sync it here.</span></div>}
+      {fieldCaptures.length > 0 && !filteredFieldCaptures.length && <div className="field-pwa-empty"><strong>No captures match the current filters.</strong><span>Clear territory, representative, date, or search filters to show uploaded and queued recordings.</span></div>}
+      {filteredFieldCaptures.length > 0 && <>
         <div className="field-pwa-record-labels" aria-hidden="true"><span>Outlet and route</span><span>Capture details</span><span>API states</span></div>
         <div className="field-pwa-record-list">
-          {fieldCaptures.map((recording) => {
+          {filteredFieldCaptures.map((recording) => {
             const sync = syncStateDetails[recording.syncState];
             const analysis = analysisStateDetails[recording.analysisState];
             return <article className="field-pwa-record" key={recording.id}>
@@ -622,10 +683,14 @@ function ManagerApp() {
                 <div className={`field-pwa-state sync-${recording.syncState}`}><span>Sync state</span><strong>syncState={sync.label}</strong><small>{sync.detail}</small></div>
                 <div className={`field-pwa-state analysis-${recording.analysisState}`}><span>Analysis state</span><strong>analysisState={analysis.label}</strong><small>{analysis.detail}</small></div>
               </div>
+              <div className="field-pwa-audio-actions">{recording.syncState === 'uploaded'
+                ? <button className="live-audio-button" type="button" onClick={() => void toggleCaptureAudio(recording.id)} disabled={captureAudioLoading === recording.id}>{captureAudioLoading === recording.id ? 'Loading audio…' : activeCaptureAudio?.id === recording.id ? 'Close audio' : 'Listen to uploaded audio'}</button>
+                : <span className={`live-upload-state sync-${recording.syncState}`}>{recording.syncState === 'queued' ? 'Audio queued for S3' : recording.syncState === 'uploading' ? 'Audio uploading' : 'Upload needs attention'}</span>}</div>
+              {activeCaptureAudio?.id === recording.id && <audio className="field-pwa-audio-player" controls preload="none" src={activeCaptureAudio.url} aria-label={`Uploaded recording from ${recording.outletName}`}/>}
             </article>;
           })}
         </div>
-        {fieldCaptureTotal > fieldCaptures.length && <p className="field-pwa-pagination-note">Showing {fieldCaptures.length} of {fieldCaptureTotal} API records; this view lists up to 100.</p>}
+        {fieldCaptureTotal > fieldCaptures.length && <p className="field-pwa-pagination-note">Showing up to 100 of {fieldCaptureTotal} API records.</p>}
       </>}
     </section>;
   }
@@ -660,7 +725,7 @@ function ManagerApp() {
         </div>
 
         {view === 'insights' || view === 'overview' ? renderInsights() : view === 'team' ? renderTeam() : renderVisits()}
-        <footer className="page-footnote"><span>{demoDataNotice}</span><span>Product demo · no real audio attached</span></footer>
+        <footer className="page-footnote"><span>{demoDataNotice}</span><span>Live uploaded audio is shown separately from synthetic reports.</span></footer>
       </div>
     </main>
 

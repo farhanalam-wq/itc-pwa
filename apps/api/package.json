@@ -10,6 +10,8 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1171.0",
+    "@aws-sdk/s3-request-presigner": "^3.1171.0",
     "@itc/contracts": "workspace:*",
     "@itc/domain": "workspace:*",
     "elysia": "2.0.0-rc.3"

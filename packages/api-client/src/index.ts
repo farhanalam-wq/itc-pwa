@@ -9,8 +9,14 @@ export interface ApiClientOptions {
 
 export interface ApiRuntimeHealth {
   persistence: 'in-memory-demo';
-  uploads: 'not-configured';
+  uploads: 'configured' | 'not-configured';
   analysis: 'not-configured';
+}
+
+export interface SignedRecordingUrl {
+  url: string;
+  objectKey: string;
+  expiresAt: string;
 }
 
 export type ApiHealthResponse = HealthResponse & { runtime: ApiRuntimeHealth };
@@ -72,6 +78,9 @@ export interface ApiClient {
   createVisitRecording(visitId: string, input: CreateRecordingRequest): Promise<RecordingMetadata>;
   getRecording(recordingId: string): Promise<RecordingMetadata>;
   listRecordings(query?: ListRecordingsQuery): Promise<RecordingPage>;
+  createRecordingUploadUrl(recordingId: string): Promise<SignedRecordingUrl>;
+  completeRecordingUpload(recordingId: string): Promise<RecordingMetadata>;
+  getRecordingDownloadUrl(recordingId: string): Promise<SignedRecordingUrl>;
 }
 
 export function createApiClientOptions(baseUrl: string): ApiClientOptions {
@@ -153,6 +162,17 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
       const queryString = search.toString();
       const suffix = queryString ? '?' + queryString : '';
       return request<RecordingPage>('/v1/recordings' + suffix);
-    }
+    },
+    createRecordingUploadUrl: (recordingId) => request<SignedRecordingUrl>(
+      '/v1/recordings/' + encodeURIComponent(recordingId) + '/upload-url',
+      { method: 'POST' }
+    ),
+    completeRecordingUpload: (recordingId) => request<RecordingMetadata>(
+      '/v1/recordings/' + encodeURIComponent(recordingId) + '/upload-complete',
+      { method: 'POST' }
+    ),
+    getRecordingDownloadUrl: (recordingId) => request<SignedRecordingUrl>(
+      '/v1/recordings/' + encodeURIComponent(recordingId) + '/download-url'
+    )
   };
 }

@@ -14,6 +14,7 @@ export interface LocalRecording extends RecordingMetadata {
   updatedAt: string;
   completedAt?: string;
   uploadAttempts: number;
+  uploadRetryable?: boolean;
   lastSyncError?: string;
   incompleteReason?: string;
 }

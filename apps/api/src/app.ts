@@ -4,6 +4,10 @@ import {
   DemoRecordingRepository,
   type RecordingRepository
 } from './repositories/demo-repository';
+import {
+  S3RecordingUploads,
+  UploadedObjectValidationError
+} from './services/s3-recording-uploads';
 
 const syncStateSchema = t.Union([
   t.Literal('queued'),
@@ -90,9 +94,17 @@ const recordingQuery = t.Object({
   offset: t.Optional(t.Numeric({ minimum: 0, maximum: 100000 }))
 });
 
+const signedUrlSchema = t.Object({
+  url: t.String({ format: 'uri' }),
+  objectKey: t.String(),
+  expiresAt: t.String({ format: 'date-time' })
+});
+
+const uploadUnavailableSchema = t.Object({ code: t.String(), message: t.String() });
+
 export interface ApiRuntimeInfo {
   persistence: 'in-memory-demo';
-  uploads: 'not-configured';
+  uploads: 'configured' | 'not-configured';
   analysis: 'not-configured';
 }
 
@@ -100,14 +112,17 @@ export interface ApiRuntimeInfo {
  * Create the API around a replaceable repository. The default adapter is
  * process-local demo storage: a restart clears visits and recording metadata.
  */
-export function createApp(repository: RecordingRepository = new DemoRecordingRepository()) {
+export function createApp(
+  repository: RecordingRepository = new DemoRecordingRepository(),
+  uploads: S3RecordingUploads = new S3RecordingUploads()
+) {
   return new Elysia()
     .get('/health', () => ({
       status: 'ok' as const,
       service: 'itc-field-source-api',
       runtime: {
         persistence: 'in-memory-demo' as const,
-        uploads: 'not-configured' as const,
+        uploads: uploads.configured ? 'configured' as const : 'not-configured' as const,
         analysis: 'not-configured' as const
       } satisfies ApiRuntimeInfo
     }))
@@ -182,6 +197,93 @@ export function createApp(repository: RecordingRepository = new DemoRecordingRep
         limit: query.limit ?? 25,
         offset: query.offset ?? 0
       });
+    })
+    .post('/v1/recordings/:recordingId/upload-url', {
+      params: recordingParams,
+      response: {
+        200: signedUrlSchema,
+        404: errorSchema,
+        409: errorSchema,
+        503: uploadUnavailableSchema
+      }
+    }, async ({ params, status }) => {
+      let recording = repository.getRecording(params.recordingId);
+      if (!recording) return status(404, { code: 'recording_not_found', message: 'The recording metadata was not found.' });
+      if (!uploads.configured) return status(503, { code: 's3_not_configured', message: 'S3 upload is not configured on the API.' });
+      if (recording.syncState === 'uploaded') {
+        return status(409, { code: 'recording_already_uploaded', message: 'This recording has already been uploaded.' });
+      }
+
+      if (recording.syncState === 'error') {
+        repository.transitionSyncState(recording.id, 'queued');
+        recording = repository.getRecording(recording.id)!;
+      }
+      const objectKey = recording.objectKey ?? uploads.objectKeyFor(recording);
+      if (recording.syncState === 'queued') {
+        const transitioned = repository.transitionSyncState(recording.id, 'uploading', objectKey);
+        if (!transitioned) return status(409, { code: 'recording_upload_conflict', message: 'The recording upload state changed. Request a fresh upload target.' });
+        recording = repository.getRecording(recording.id)!;
+      }
+      if (recording.syncState !== 'uploading' || !recording.objectKey) {
+        return status(409, { code: 'recording_not_uploadable', message: 'The recording is not ready for an S3 upload.' });
+      }
+
+      try {
+        return await uploads.createUploadUrl(recording, recording.objectKey);
+      } catch {
+        repository.transitionSyncState(recording.id, 'error');
+        return status(503, { code: 's3_signing_failed', message: 'The API could not sign an S3 upload. Check its AWS credentials and retry.' });
+      }
+    })
+    .post('/v1/recordings/:recordingId/upload-complete', {
+      params: recordingParams,
+      response: {
+        200: recordingSchema,
+        404: errorSchema,
+        409: errorSchema,
+        503: uploadUnavailableSchema
+      }
+    }, async ({ params, status }) => {
+      let recording: RecordingMetadata | undefined = repository.getRecording(params.recordingId);
+      if (!recording) return status(404, { code: 'recording_not_found', message: 'The recording metadata was not found.' });
+      if (!uploads.configured) return status(503, { code: 's3_not_configured', message: 'S3 upload is not configured on the API.' });
+      if (recording.syncState === 'uploaded') return recording;
+      if (recording.syncState !== 'uploading' || !recording.objectKey) {
+        return status(409, { code: 'recording_not_uploading', message: 'The recording has no active S3 upload to complete.' });
+      }
+      try {
+        await uploads.verifyUploadedObject(recording);
+      } catch (error) {
+        if (error instanceof UploadedObjectValidationError) {
+          repository.transitionSyncState(recording.id, 'error');
+          return status(409, { code: 'uploaded_audio_invalid', message: error.message });
+        }
+        return status(503, { code: 's3_verification_failed', message: 'The API could not verify the S3 upload. Retry completion when the API is reachable.' });
+      }
+      repository.transitionSyncState(recording.id, 'uploaded', recording.objectKey);
+      recording = repository.getRecording(recording.id)!;
+      return recording;
+    })
+    .get('/v1/recordings/:recordingId/download-url', {
+      params: recordingParams,
+      response: {
+        200: signedUrlSchema,
+        404: errorSchema,
+        409: errorSchema,
+        503: uploadUnavailableSchema
+      }
+    }, async ({ params, status }) => {
+      const recording = repository.getRecording(params.recordingId);
+      if (!recording) return status(404, { code: 'recording_not_found', message: 'The recording metadata was not found.' });
+      if (!uploads.configured) return status(503, { code: 's3_not_configured', message: 'S3 upload is not configured on the API.' });
+      if (recording.syncState !== 'uploaded' || !recording.objectKey) {
+        return status(409, { code: 'recording_not_uploaded', message: 'This recording does not have an uploaded S3 object.' });
+      }
+      try {
+        return await uploads.createDownloadUrl(recording);
+      } catch {
+        return status(503, { code: 's3_signing_failed', message: 'The API could not sign an S3 playback link.' });
+      }
     })
     .get('/v1/recordings/:recordingId/analysis', {
       params: recordingParams,

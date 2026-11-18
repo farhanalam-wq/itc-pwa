@@ -124,9 +124,19 @@ export async function registerPendingMetadata(
 
 /** Process the queue on startup and each time browser connectivity returns. */
 export function startMetadataRegistrationSync(
-  client: ApiClient
+  client: ApiClient,
+  afterMetadataRegistration?: () => Promise<unknown>
 ): MetadataRegistrationSyncController {
-  const process = () => registerPendingMetadata(client);
+  let activeProcess: Promise<MetadataRegistrationBatchResult> | undefined;
+  const process = () => {
+    if (activeProcess) return activeProcess;
+    activeProcess = (async () => {
+      const result = await registerPendingMetadata(client);
+      await afterMetadataRegistration?.();
+      return result;
+    })().finally(() => { activeProcess = undefined; });
+    return activeProcess;
+  };
   const onOnline = () => { void process().catch(() => undefined); };
 
   if (typeof window !== 'undefined') {

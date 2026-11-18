@@ -12,6 +12,7 @@ import {
   type StorageSnapshot
 } from './storage';
 import { startMetadataRegistrationSync, type MetadataRegistrationSyncController } from './sync/metadata-registration';
+import { uploadPendingAudio } from './sync/audio-upload';
 import './styles.css';
 
 type Screen = 'capture' | 'history';
@@ -38,6 +39,18 @@ function formatDateTime(value: string): string {
 function formatBytes(value: number): string {
   if (value < 1_000_000) return `${Math.max(1, Math.round(value / 1000))} KB`;
   return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)} MB`;
+}
+
+function formatStorageBytes(value: number): string {
+  if (value < 1000) return `${Math.round(value)} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let amount = value / 1000;
+  let unitIndex = 0;
+  while (amount >= 1000 && unitIndex < units.length - 1) {
+    amount /= 1000;
+    unitIndex += 1;
+  }
+  return `${amount.toFixed(amount >= 100 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
 function getPreferredMimeType(): string | undefined {
@@ -75,24 +88,62 @@ function MetadataState({ recording }: { recording: LocalRecording }) {
   return <span className="metadata-state">Visit details queued</span>;
 }
 
+function StorageBreakdown({ snapshot }: { snapshot: StorageSnapshot | null }) {
+  if (!snapshot || snapshot.quota === undefined || snapshot.usage === undefined) {
+    return <section className="storage-breakdown" aria-labelledby="storage-title">
+      <div className="storage-heading"><h2 id="storage-title">Device storage</h2><span>Browser estimate unavailable</span></div>
+      <p className="storage-scope">This browser does not expose this origin’s storage quota. It also cannot report the device’s total disk space.</p>
+    </section>;
+  }
+  const quota = snapshot.quota;
+  const used = Math.min(snapshot.usage, quota);
+  const recordingAudio = Math.min(snapshot.recordingAudioBytes, used);
+  const otherAppData = Math.max(0, used - recordingAudio);
+  const available = Math.max(0, quota - used);
+  const percent = (value: number) => quota > 0 ? `${(value / quota) * 100}%` : '0%';
+  return <section className="storage-breakdown" aria-labelledby="storage-title">
+    <div className="storage-heading"><h2 id="storage-title">Device storage</h2><span>{snapshot.persistent ? 'Protected storage' : 'Browser-managed storage'}</span></div>
+    <div className="storage-meter" role="meter" aria-label="This app’s browser storage used" aria-valuemin={0} aria-valuemax={quota} aria-valuenow={used}>
+      <i className="storage-meter-audio" style={{ width: percent(recordingAudio) }}/>
+      <i className="storage-meter-other" style={{ width: percent(otherAppData) }}/>
+      <i className="storage-meter-free" style={{ width: percent(available) }}/>
+    </div>
+    <div className="storage-breakdown-legend">
+      <div><i className="storage-swatch audio"/><span>Field recordings</span><strong>{formatStorageBytes(recordingAudio)}</strong></div>
+      <div><i className="storage-swatch other"/><span>Other site data</span><strong>{formatStorageBytes(otherAppData)}</strong></div>
+      <div><i className="storage-swatch free"/><span>Available origin quota</span><strong>{formatStorageBytes(available)}</strong></div>
+    </div>
+    <p className="storage-scope">{formatStorageBytes(used)} occupied of {formatStorageBytes(quota)} estimated origin storage. This quota is per browser origin and may change; it is not the laptop, phone, or tablet’s total disk space.</p>
+  </section>;
+}
+
 function RecordingRow({
   recording,
   playingId,
   audioUrl,
-  onPlay
+  onPlay,
+  uploadsConfigured,
+  onRetry
 }: {
   recording: LocalRecording;
   playingId: string | null;
   audioUrl: string | null;
   onPlay: (recording: LocalRecording) => void;
+  uploadsConfigured: boolean;
+  onRetry: (recording: LocalRecording) => void;
 }) {
   const localOnly = recording.syncState !== 'uploaded';
+  const uploadStatus = recording.syncState === 'uploaded' ? 'Uploaded to S3'
+    : recording.syncState === 'uploading' ? 'Uploading to S3'
+      : recording.syncState === 'error' ? 'Upload needs retry'
+        : uploadsConfigured ? 'Queued for S3' : 'S3 not configured';
   return <article className="recording-row">
     <div className="row-main">
       <div className="row-title"><strong>{recording.outletName}</strong><span>{recording.localState === 'incomplete' ? 'Incomplete' : 'On this phone'}</span></div>
       <div className="row-meta"><time dateTime={recording.startedAt}>{formatDateTime(recording.startedAt)}</time><span>{formatElapsed(recording.durationSeconds).slice(1).join(':')}</span><span>{formatBytes(recording.byteLength)}</span></div>
-      <div className="row-states"><span className={localOnly ? 'audio-state local' : 'audio-state uploaded'}>{localOnly ? 'S3 upload unavailable' : 'Audio uploaded'}</span><MetadataState recording={recording}/></div>
+      <div className="row-states"><span className={localOnly ? 'audio-state local' : 'audio-state uploaded'} title={recording.lastSyncError}>{uploadStatus}</span><MetadataState recording={recording}/></div>
       {recording.localState === 'incomplete' && recording.incompleteReason && <p className="row-warning">{recording.incompleteReason}</p>}
+      {recording.syncState === 'error' && uploadsConfigured && <button className="retry-upload" type="button" onClick={() => onRetry(recording)}>Retry upload</button>}
       {playingId === recording.id && audioUrl && <audio className="audio-player" controls autoPlay src={audioUrl} aria-label={`Local recording from ${recording.outletName}`} onEnded={() => onPlay(recording)}/>}
     </div>
     {recording.byteLength > 0 && <button className="listen-button" type="button" onClick={() => onPlay(recording)} aria-label={`${playingId === recording.id ? 'Close' : 'Play'} local recording from ${recording.outletName}`}>
@@ -139,7 +190,9 @@ function FieldApp() {
     && Boolean(outletName.trim() && representativeId.trim() && territoryId.trim())
     && consent
     && recorderState === 'ready';
-  const queueCount = useMemo(() => records.filter((record) => record.localState === 'ready' && record.syncState === 'queued').length, [records]);
+  const queueCount = useMemo(() => records.filter((record) => record.localState === 'ready'
+    && (record.syncState === 'queued' || record.syncState === 'uploading'
+      || (record.syncState === 'error' && record.uploadRetryable !== false))).length, [records]);
   const orderedRecords = useMemo(() => [...records].sort((a, b) => b.startedAt.localeCompare(a.startedAt)), [records]);
   const displayRecords = orderedRecords.filter((record) => record.localState !== 'recording');
   const [hours, minutes, seconds] = formatElapsed(elapsed);
@@ -222,7 +275,10 @@ function FieldApp() {
       if (result.items.length) void refreshLocalState();
     }).catch((error) => setStorageError(error instanceof Error ? error.message : 'Interrupted recordings could not be checked.'));
 
-    const sync = startMetadataRegistrationSync(apiClient);
+    const sync = startMetadataRegistrationSync(apiClient, async () => {
+      await uploadPendingAudio(apiClient);
+      await refreshLocalState();
+    });
     syncRef.current = sync;
     const onOnline = () => {
       setOnline(true);
@@ -234,6 +290,7 @@ function FieldApp() {
       setApiHealth(null);
     };
     const retryTimer = window.setInterval(() => {
+      void refreshLocalState();
       if (!navigator.onLine) return;
       void refreshApiHealth();
       void sync.process().then((result) => {
@@ -383,14 +440,21 @@ function FieldApp() {
         return;
       }
       setNotice({ kind: 'success', text: online
-        ? 'Audio saved on this phone. Visit details will register with the manager API; S3 upload is not configured.'
-        : 'Audio saved on this phone. Visit details will register when you are online; audio remains local until S3 is configured.' });
+        ? uploadsConfigured ? 'Audio saved on this device. Visit details are linking and the S3 upload is starting.' : 'Audio saved on this device. S3 upload is not configured on the API.'
+        : 'Audio saved on this device. Visit details and audio will sync when the connection returns.' });
       setRecorderState('ready');
       await refreshLocalState();
       if (navigator.onLine) {
         const result = await syncRef.current?.process();
         if (result?.failures.length) {
           setNotice({ kind: 'info', text: 'Audio is safe on this phone. Manager visit details will retry when the API is reachable.' });
+        } else {
+          const current = await recordingStore.get(saved.id);
+          if (current?.syncState === 'uploaded') {
+            setNotice({ kind: 'success', text: 'Recording uploaded to S3. The local copy stays available in history.' });
+          } else if (current?.syncState === 'error') {
+            setNotice({ kind: 'info', text: `Recording is safe on this device. Upload needs a retry: ${current.lastSyncError ?? 'check the API and S3 configuration.'}` });
+          }
         }
         await refreshApiHealth();
         await refreshLocalState();
@@ -456,6 +520,17 @@ function FieldApp() {
     }
   }
 
+  async function handleRetryUpload(recording: LocalRecording) {
+    try {
+      await recordingStore.retryUpload(recording.id);
+      await refreshLocalState();
+      if (navigator.onLine) await syncRef.current?.process();
+      await refreshLocalState();
+    } catch (error) {
+      setNotice({ kind: 'error', text: error instanceof Error ? error.message : 'This recording could not be queued for upload.' });
+    }
+  }
+
   const statusTitle = !support.supported ? 'LOCAL STORAGE UNAVAILABLE'
     : !online ? 'OFFLINE · READY TO RECORD'
       : 'READY TO RECORD';
@@ -465,9 +540,10 @@ function FieldApp() {
   const connectionLabel = !online ? 'Offline · local save'
     : apiHealth ? 'Manager API online'
       : 'Manager API unavailable';
-  const uploadLabel = apiHealth?.runtime.uploads === 'not-configured'
-    ? 'S3 upload unavailable'
-    : 'Audio stays on this phone';
+  const uploadsConfigured = apiHealth?.runtime.uploads === 'configured';
+  const uploadLabel = uploadsConfigured
+    ? online ? 'S3 upload sync is ready' : 'S3 uploads wait for connection'
+    : apiHealth ? 'S3 upload not configured' : online ? 'Checking upload service' : 'S3 upload waits for connection';
 
   return <div className="app-shell">
     <header className="field-topbar">
@@ -484,6 +560,8 @@ function FieldApp() {
           <div className="readiness-copy"><strong>{statusTitle}</strong><small>{statusDetail}</small></div>
           <span className={`queue-count ${queueCount ? 'has-queue' : ''}`}>{queueCount} local</span>
         </section>
+
+        <StorageBreakdown snapshot={storage}/>
 
         <div className="visit-heading"><div><h1>New recording</h1><p>{outletName.trim() || 'Add the shop you’re visiting'}{territoryId.trim() ? ` · ${territoryId.trim()}` : ''}</p></div><button className="history-link" type="button" onClick={() => setScreen('history')}><Icon name="history"/>History</button></div>
 
@@ -523,15 +601,16 @@ function FieldApp() {
           <div className="list-heading"><h2>Recent recordings</h2>{storage && !storage.persistent
             ? <button className="storage-prompt" type="button" onClick={() => { void handleEnablePersistence(); }}>Protect local audio</button>
             : <span>{displayRecords.length ? `${displayRecords.length} on this phone` : 'No recordings yet'}</span>}</div>
-          {displayRecords.length ? displayRecords.slice(0, 3).map((recording) => <RecordingRow key={recording.id} recording={recording} playingId={playingId} audioUrl={audioUrl} onPlay={(item) => { void handlePlay(item); }}/> )
+          {displayRecords.length ? displayRecords.slice(0, 3).map((recording) => <RecordingRow key={recording.id} recording={recording} playingId={playingId} audioUrl={audioUrl} onPlay={(item) => { void handlePlay(item); }} uploadsConfigured={uploadsConfigured} onRetry={(item) => { void handleRetryUpload(item); }}/> )
             : <p className="empty-history">Stopped recordings appear here with their local-save and manager-link status.</p>}
         </section>
       </> : <section className="history-screen">
         <div className="history-title"><div><h1>Recording history</h1><p>Audio and visit details saved on this device.</p></div><span className="history-total">{displayRecords.length}</span></div>
-        {displayRecords.length ? <div className="full-history">{displayRecords.map((recording) => <RecordingRow key={recording.id} recording={recording} playingId={playingId} audioUrl={audioUrl} onPlay={(item) => { void handlePlay(item); }}/>)}</div>
-          : <div className="empty-screen"><span className="empty-icon"><Icon name="history"/></span><h2>No recordings yet</h2><p>Start a consented shop visit. The audio will be saved here before any upload is available.</p><button className="text-button" type="button" onClick={() => setScreen('capture')}>Return to capture</button></div>}
+        <StorageBreakdown snapshot={storage}/>
+        {displayRecords.length ? <div className="full-history">{displayRecords.map((recording) => <RecordingRow key={recording.id} recording={recording} playingId={playingId} audioUrl={audioUrl} onPlay={(item) => { void handlePlay(item); }} uploadsConfigured={uploadsConfigured} onRetry={(item) => { void handleRetryUpload(item); }}/>)}</div>
+        : <div className="empty-screen"><span className="empty-icon"><Icon name="history"/></span><h2>No recordings yet</h2><p>Start a consented shop visit. The audio is saved here before it syncs to S3.</p><button className="text-button" type="button" onClick={() => setScreen('capture')}>Return to capture</button></div>}
         {recovery?.items.length ? <div className="recovery-note"><strong>Interrupted captures</strong>{recovery.items.map((item) => <p key={item.id}>{item.message}</p>)}</div> : null}
-        <div className="history-footnote"><strong>Media upload</strong><span>{uploadLabel}. New recordings will remain in OPFS while S3 is unconfigured.</span><strong>Conversation analysis</strong><span>{apiHealth?.runtime.analysis === 'not-configured' ? 'Transcription and insight extraction are not configured.' : 'Analysis state appears after audio is uploaded.'}</span></div>
+        <div className="history-footnote"><strong>Media upload</strong><span>{uploadsConfigured ? 'Audio syncs to S3 after the device comes online; a local OPFS copy stays on this device.' : `${uploadLabel}. Recordings stay in OPFS until the API has S3 configured.`}</span><strong>Conversation analysis</strong><span>{apiHealth?.runtime.analysis === 'not-configured' ? 'Transcription and insight extraction are not configured.' : 'Analysis state appears after audio is uploaded.'}</span></div>
       </section>}
     </main>
 

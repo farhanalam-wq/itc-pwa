@@ -47,6 +47,7 @@ export interface RecoveryReport {
 export interface StorageSnapshot {
   quota?: number;
   usage?: number;
+  recordingAudioBytes: number;
   persistent: boolean;
 }
 
@@ -208,7 +209,9 @@ export class RecordingStore {
   async listUploadQueue(): Promise<LocalRecording[]> {
     const records = await listLocalRecordings();
     return records
-      .filter((record) => record.localState === 'ready' && record.syncState === 'queued')
+      .filter((record) => record.localState === 'ready'
+        && (record.syncState === 'queued' || record.syncState === 'uploading'
+          || (record.syncState === 'error' && record.uploadRetryable !== false)))
       .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
   }
 
@@ -259,7 +262,7 @@ export class RecordingStore {
   async setSyncState(
     id: string,
     syncState: SyncState,
-    options: { objectKey?: string; error?: string; incrementAttempt?: boolean } = {}
+    options: { objectKey?: string; error?: string; retryable?: boolean; incrementAttempt?: boolean } = {}
   ): Promise<LocalRecording> {
     return updateLocalRecording(id, (recording) => {
       if (recording.localState !== 'ready') {
@@ -270,6 +273,7 @@ export class RecordingStore {
         syncState,
         objectKey: options.objectKey ?? recording.objectKey,
         uploadAttempts: recording.uploadAttempts + (options.incrementAttempt ? 1 : 0),
+        uploadRetryable: syncState === 'error' ? options.retryable ?? true : undefined,
         lastSyncError: syncState === 'error' ? options.error ?? 'Upload failed.' : undefined,
         updatedAt: nowIso()
       };
@@ -292,6 +296,7 @@ export class RecordingStore {
       return {
         ...recording,
         syncState: 'queued',
+        uploadRetryable: undefined,
         lastSyncError: undefined,
         updatedAt: nowIso()
       };
@@ -395,13 +400,21 @@ export class RecordingStore {
   }
 
   async storageSnapshot(): Promise<StorageSnapshot> {
-    const estimate = await getStorageEstimate();
+    const [estimate, recordings] = await Promise.all([getStorageEstimate(), listLocalRecordings()]);
     const persistent = typeof navigator !== 'undefined' && navigator.storage?.persisted
       ? await navigator.storage.persisted()
       : false;
+    const fileSizes = await Promise.all(recordings.map(async (recording) => {
+      try {
+        return (await getAudioFile(recording.fileName)).size;
+      } catch {
+        return 0;
+      }
+    }));
     return {
       quota: estimate?.quota,
       usage: estimate?.usage,
+      recordingAudioBytes: fileSizes.reduce((total, size) => total + size, 0),
       persistent
     };
   }
