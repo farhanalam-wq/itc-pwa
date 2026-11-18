@@ -14,6 +14,7 @@ A Bun-managed Turborepo workspace for the Field Source Manager proof of concept.
 - `packages/charts` — shared ApexCharts types, options, and reporting visualizations
 - `packages/demo-data` — explicitly synthetic demo fixtures
 - `docs/implementation-plan.md` — phase-by-phase delivery plan and acceptance gates
+- `docs/subagent-strategy.md` — phase-aligned delegation, ownership, and integration method
 
 ## Requirements
 
