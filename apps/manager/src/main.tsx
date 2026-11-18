@@ -10,13 +10,16 @@ import {
   type DemoSignalAggregate
 } from '@itc/demo-data';
 import { ReportChart } from '@itc/charts';
-import type { AnalysisState, RecordingMetadata, SyncState } from '@itc/domain';
+import type { AnalysisState, ManualTranscriptAnalysis, RecordingMetadata, SyncState } from '@itc/domain';
+import { OverviewPanel } from './overview-panel';
+import { TranscriptImportForm, type TranscriptImportInput } from './transcript-import-form';
 import '@fontsource-variable/hanken-grotesk';
 import './styles.css';
 
 type View = 'overview' | 'insights' | 'team' | 'visits';
 type Period = '7' | '30' | 'all';
 type CaptureApiState = 'loading' | 'available' | 'unavailable';
+type TranscriptImportStatus = { kind: 'success' | 'error' | 'info'; message: string } | null;
 
 const captureApi = createApiClient({ baseUrl: '/api' });
 
@@ -81,6 +84,18 @@ function formatDateTime(value: string): string {
   return new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(new Date(value));
 }
 
+function formatDateOnly(value: string): string {
+  return new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${value}T00:00:00Z`));
+}
+
+function formatDueLabel(value: string): string {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? formatDateOnly(value) : formatDateTime(value);
+}
+
+function conversationDateKey(item: Pick<DemoConversation, 'createdAt' | 'conversationDate'>): string {
+  return item.conversationDate ?? item.createdAt.slice(0, 10);
+}
+
 function formatDuration(seconds: number): string {
   const minutes = Math.floor(seconds / 60);
   const remainder = seconds % 60;
@@ -91,6 +106,7 @@ function outcomeLabel(value: DemoConversation['outcome']): string {
   if (value === 'order_placed') return 'Order placed';
   if (value === 'follow_up') return 'Follow-up';
   if (value === 'new_outlet') return 'New outlet';
+  if (value === 'not_stated') return 'Not stated';
   return 'No order';
 }
 
@@ -126,7 +142,7 @@ function Icon({ name }: { name: 'grid' | 'signal' | 'team' | 'list' | 'search' |
 }
 
 function ManagerApp() {
-  const [view, setView] = useState<View>('insights');
+  const [view, setView] = useState<View>('overview');
   const [period, setPeriod] = useState<Period>('7');
   const [territory, setTerritory] = useState('all');
   const [representative, setRepresentative] = useState('all');
@@ -143,6 +159,10 @@ function ManagerApp() {
   const [activeCaptureAudio, setActiveCaptureAudio] = useState<{ id: string; url: string } | null>(null);
   const [captureAudioLoading, setCaptureAudioLoading] = useState<string | null>(null);
   const [capturePlaybackError, setCapturePlaybackError] = useState<string | null>(null);
+  const [manualTranscripts, setManualTranscripts] = useState<ManualTranscriptAnalysis[]>([]);
+  const [transcriptApiState, setTranscriptApiState] = useState<CaptureApiState>('loading');
+  const [transcriptImportBusy, setTranscriptImportBusy] = useState(false);
+  const [transcriptImportStatus, setTranscriptImportStatus] = useState<TranscriptImportStatus>(null);
   const dialogRef = useRef<HTMLElement | null>(null);
   const dialogCloseRef = useRef<HTMLButtonElement | null>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
@@ -153,18 +173,22 @@ function ManagerApp() {
     captureRequestInFlightRef.current = true;
     setCaptureRefreshing(true);
     try {
-      const [health, page] = await Promise.all([
+      const [health, page, transcriptPage] = await Promise.all([
         captureApi.getHealth(),
-        captureApi.listRecordings({ limit: 100 })
+        captureApi.listRecordings({ limit: 100 }),
+        captureApi.listTranscripts()
       ]);
       setFieldCaptures(page.recordings);
       setFieldCaptureTotal(page.total);
       setCaptureRuntime(health.runtime);
       setCaptureApiState('available');
+      setManualTranscripts(transcriptPage.transcripts);
+      setTranscriptApiState('available');
       setCaptureError(null);
       setCaptureLastUpdated(new Date());
     } catch (error) {
       setCaptureApiState('unavailable');
+      setTranscriptApiState('unavailable');
       setCaptureError(error instanceof Error ? error.message : 'The capture API could not be reached.');
     } finally {
       captureRequestInFlightRef.current = false;
@@ -179,13 +203,16 @@ function ManagerApp() {
   }, [refreshFieldCaptures]);
 
   const territories = useMemo(() => [...new Set([
-    ...demoConversations.map((item) => item.territoryName),
+    ...demoConversations.map((item) => item.territoryName ?? item.territoryId),
+    ...manualTranscripts.map((item) => item.territoryName ?? item.territoryId),
     ...fieldCaptures.map((item) => item.territoryId)
-  ])].sort(), [fieldCaptures]);
+  ])].sort(), [fieldCaptures, manualTranscripts]);
   const representatives = useMemo(() => [...new Set([
-    ...demoConversations.map((item) => item.representativeName),
+    ...demoConversations.map((item) => item.representativeName ?? item.representativeId),
+    ...manualTranscripts.map((item) => item.representativeName ?? item.representativeId),
     ...fieldCaptures.map((item) => item.representativeId)
-  ])].sort(), [fieldCaptures]);
+  ])].sort(), [fieldCaptures, manualTranscripts]);
+  const reportAsOfDate = [new Date().toISOString().slice(0, 10), demoAsOfDate].sort().at(-1)!;
   const filteredFieldCaptures = useMemo(() => {
     const cutoff = period === 'all' ? 0 : Date.now() - Number(period) * 86_400_000;
     const query = search.trim().toLowerCase();
@@ -198,23 +225,33 @@ function ManagerApp() {
     });
   }, [fieldCaptures, period, territory, representative, search]);
   const conversations = useMemo(() => {
-    const cutoffDate = period === 'all' ? '0000-01-01' : shiftDateKey(demoAsOfDate, 1 - Number(period));
+    const cutoffDate = period === 'all' ? '0000-01-01' : shiftDateKey(reportAsOfDate, 1 - Number(period));
     const query = search.trim().toLowerCase();
-    return demoConversations.filter((item) => {
-      const captureDate = item.createdAt.slice(0, 10);
-      if (captureDate > demoAsOfDate || captureDate < cutoffDate) return false;
-      if (territory !== 'all' && item.territoryName !== territory) return false;
-      if (representative !== 'all' && item.representativeName !== representative) return false;
-      if (query && !`${item.outletName} ${item.representativeName} ${item.territoryName} ${item.summary}`.toLowerCase().includes(query)) return false;
+    const manualReports: DemoConversation[] = manualTranscripts.map((item) => ({
+      ...item,
+      representativeName: item.representativeName ?? item.representativeId,
+      representativeInitials: item.representativeInitials ?? item.representativeId.slice(0, 2).toUpperCase(),
+      territoryName: item.territoryName ?? item.territoryId,
+      outletId: item.outletId ?? `manual-outlet:${item.outletName.trim().toLocaleLowerCase()}`
+    }));
+    return [...demoConversations, ...manualReports].filter((item) => {
+      const captureDate = conversationDateKey(item);
+      if (captureDate > reportAsOfDate || captureDate < cutoffDate) return false;
+      if (territory !== 'all' && (item.territoryName ?? item.territoryId) !== territory) return false;
+      if (representative !== 'all' && (item.representativeName ?? item.representativeId) !== representative) return false;
+      if (query && !`${item.outletName} ${item.representativeName ?? item.representativeId} ${item.territoryName ?? item.territoryId} ${item.summary}`.toLowerCase().includes(query)) return false;
       return true;
     });
-  }, [period, territory, representative, search]);
+  }, [period, territory, representative, search, manualTranscripts, reportAsOfDate]);
   const signals = useMemo(() => aggregateDemoSignals(conversations), [conversations]);
   const visibleSignals = useMemo(() => signals.filter((item) => item.category !== 'conversation_quality'), [signals]);
   const selectedSignal = visibleSignals.find((item) => item.taxonomyKey === selectedKey) ?? visibleSignals[0];
   const selectedEvidence = selectedSignal?.examples[0];
   const evidenceVisit = selectedEvidence ? conversations.find((item) => item.id === selectedEvidence.visitId) : undefined;
   const detailVisit = conversations.find((item) => item.id === visitId);
+  const originalTranscriptText = detailVisit?.source === 'manual_transcript'
+    ? manualTranscripts.find((item) => item.id === detailVisit.id)?.rawTranscript
+    : undefined;
   useEffect(() => {
     if (!detailVisit) return;
     dialogCloseRef.current?.focus();
@@ -244,17 +281,18 @@ function ManagerApp() {
     };
   }, [detailVisit]);
   const analyzedCount = conversations.length;
-  const outletCount = new Set(conversations.map((item) => item.outletId)).size;
+  const outletCount = new Set(conversations.map((item) => item.outletId ?? item.outletName.trim().toLocaleLowerCase())).size;
   const orderCount = conversations.filter((item) => item.outcome === 'order_placed').length;
   const followUpCount = conversations.filter((item) => item.outcome === 'follow_up').length;
   const totalExplicitOrderValue = conversations.reduce((sum, item) => sum + (item.confirmedOrderValueInr ?? 0), 0);
   const territoryRows = selectedSignal ? conversations.reduce<Array<{ name: string; mentions: number; outlets: Set<string> }>>((rows, conversation) => {
     const matching = conversation.insights.filter((insight) => insight.taxonomyKey === selectedSignal.taxonomyKey);
     if (!matching.length) return rows;
-    let row = rows.find((item) => item.name === conversation.territoryName);
-    if (!row) { row = { name: conversation.territoryName, mentions: 0, outlets: new Set<string>() }; rows.push(row); }
+    const territoryName = conversation.territoryName ?? conversation.territoryId;
+    let row = rows.find((item) => item.name === territoryName);
+    if (!row) { row = { name: territoryName, mentions: 0, outlets: new Set<string>() }; rows.push(row); }
     row.mentions += matching.reduce((sum, insight) => sum + insight.mentionCount, 0);
-    row.outlets.add(conversation.outletId);
+    row.outlets.add(conversation.outletId ?? conversation.outletName.trim().toLocaleLowerCase());
     return rows;
   }, []).sort((a, b) => b.mentions - a.mentions) : [];
   const maxMentions = Math.max(1, ...territoryRows.map((row) => row.mentions));
@@ -271,7 +309,7 @@ function ManagerApp() {
   const trendBuckets = useMemo(() => {
     const buckets = new Map<string, { label: string; timestamp: number; visits: number; orders: number; followUps: number }>();
     for (const item of conversations) {
-      const date = new Date(item.createdAt);
+      const date = new Date(`${conversationDateKey(item)}T12:00:00`);
       const label = new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short' }).format(date);
       const existing = buckets.get(label) ?? { label, timestamp: new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime(), visits: 0, orders: 0, followUps: 0 };
       existing.visits += 1;
@@ -286,20 +324,21 @@ function ManagerApp() {
     { label: 'Order placed', count: conversations.filter((item) => item.outcome === 'order_placed').length, color: palette.green },
     { label: 'Follow-up agreed', count: conversations.filter((item) => item.outcome === 'follow_up').length, color: '#b2c96b' },
     { label: 'No order', count: conversations.filter((item) => item.outcome === 'no_order').length, color: '#c78343' },
-    { label: 'New outlet', count: conversations.filter((item) => item.outcome === 'new_outlet').length, color: '#5e8270' }
+    { label: 'New outlet', count: conversations.filter((item) => item.outcome === 'new_outlet').length, color: '#5e8270' },
+    { label: 'Not stated', count: conversations.filter((item) => item.outcome === 'not_stated').length, color: '#87938b' }
   ], [conversations]);
 
   const sentimentRows = useMemo(() => {
-    const labels = ['positive', 'neutral', 'hesitant', 'at_risk'] as const;
+    const labels = ['positive', 'neutral', 'hesitant', 'at_risk', 'unknown'] as const;
     return labels.map((label) => ({ label: label.replace('_', ' '), count: conversations.filter((item) => item.sentimentCue === label).length }));
   }, [conversations]);
 
   const demandSignals = signals.filter((signal) => signal.category === 'demand').slice(0, 5);
-  const demandHeatmapSeries = [...new Set(conversations.map((item) => item.territoryName))].sort().map((territoryName) => ({
+  const demandHeatmapSeries = [...new Set(conversations.map((item) => item.territoryName ?? item.territoryId))].sort().map((territoryName) => ({
     name: territoryName,
     data: demandSignals.map((signal) => ({
       x: signal.title,
-      y: conversations.filter((conversation) => conversation.territoryName === territoryName && conversation.insights.some((insight) => insight.taxonomyKey === signal.taxonomyKey)).length
+      y: conversations.filter((conversation) => (conversation.territoryName ?? conversation.territoryId) === territoryName && conversation.insights.some((insight) => insight.taxonomyKey === signal.taxonomyKey)).length
     }))
   }));
 
@@ -346,19 +385,19 @@ function ManagerApp() {
         continue;
       }
       const dueDate = conversation.nextActionDue.slice(0, 10);
-      const dayOffset = Math.round((Date.parse(`${dueDate}T00:00:00Z`) - Date.parse(`${demoAsOfDate}T00:00:00Z`)) / 86_400_000);
+      const dayOffset = Math.round((Date.parse(`${dueDate}T00:00:00Z`) - Date.parse(`${reportAsOfDate}T00:00:00Z`)) / 86_400_000);
       if (dayOffset < 0) buckets[0].count += 1;
       else if (dayOffset === 0) buckets[1].count += 1;
       else if (dayOffset <= 7) buckets[2].count += 1;
       else buckets[3].count += 1;
     }
     return buckets;
-  }, [conversations]);
+  }, [conversations, reportAsOfDate]);
 
   const representativeRows = useMemo(() => representatives
     .filter((name) => representative === 'all' || name === representative)
     .map((name) => {
-      const visits = conversations.filter((item) => item.representativeName === name);
+      const visits = conversations.filter((item) => (item.representativeName ?? item.representativeId) === name);
       return {
         name,
         initials: visits[0]?.representativeInitials ?? name.split(' ').map((part) => part[0]).join('').slice(0, 2),
@@ -419,7 +458,7 @@ function ManagerApp() {
   const sentimentOptions: ApexOptions = {
     ...baseChart,
     chart: { ...baseChart.chart, type: 'bar', stacked: true },
-    colors: [palette.green, '#829889', '#d2a45e', '#b16a44'],
+    colors: [palette.green, '#829889', '#d2a45e', '#b16a44', '#b7c0ba'],
     plotOptions: { bar: { horizontal: false, columnWidth: '42%', borderRadius: 2 } },
     xaxis: { ...commonAxis, categories: ['Conversation cues'] },
     yaxis: { min: 0, forceNiceScale: true, labels: { style: { colors: palette.muted, fontSize: '11px' } }, title: { text: 'Visits', style: { fontSize: '10px', fontWeight: 500 } } },
@@ -474,7 +513,7 @@ function ManagerApp() {
   };
 
   const viewTitle: Record<View, string> = {
-    overview: 'Field conversations, made reviewable',
+    overview: 'Field activity at a glance',
     insights: selectedSignal?.taxonomyKey === 'demand.small-pack-five-rupees' ? 'Retailers are asking for smaller packs' : selectedSignal?.title ?? 'Conversation signals',
     team: 'Field activity with its evidence attached',
     visits: 'Recent field conversations'
@@ -501,10 +540,35 @@ function ManagerApp() {
     }
   }
 
+  async function ingestManualTranscript(input: TranscriptImportInput) {
+    setTranscriptImportBusy(true);
+    setTranscriptImportStatus(null);
+    try {
+      const result = await captureApi.ingestTranscript(input);
+      setManualTranscripts((current) => [result, ...current.filter((item) => item.id !== result.id)]);
+      setTranscriptApiState('available');
+      setTranscriptImportStatus({
+        kind: 'success',
+        message: result.storageState === 's3'
+          ? `Analysis is ready. The source transcript is stored in S3 at ${result.objectKey}.`
+          : 'Analysis is ready for this API session. Configure S3 credentials to persist the source transcript.'
+      });
+      setView('insights');
+    } catch (error) {
+      setTranscriptApiState(error instanceof Error && 'status' in error && error.status === 0 ? 'unavailable' : transcriptApiState);
+      setTranscriptImportStatus({
+        kind: 'error',
+        message: error instanceof Error ? error.message : 'The transcript could not be analyzed. Check the API and try again.'
+      });
+    } finally {
+      setTranscriptImportBusy(false);
+    }
+  }
+
   function renderLiveCapturePreview() {
     const recent = filteredFieldCaptures.slice(0, 4);
     return <section className="live-capture-preview" aria-labelledby="live-capture-title" aria-busy={captureRefreshing}>
-      <div className="live-capture-heading"><div><h2 id="live-capture-title">Live field recordings</h2><p>Real PWA captures from the API. They are kept separate from the synthetic conversation charts below.</p></div>
+      <div className="live-capture-heading"><div><h2 id="live-capture-title">Live field recordings</h2><p>Real PWA captures from the API. They are kept separate from transcript-derived conversation reports below.</p></div>
         <button className="text-action" type="button" onClick={() => setView('visits')}>Open capture history <Icon name="arrow"/></button>
       </div>
       {captureApiState === 'unavailable' && <p className="live-capture-empty">The capture API is unavailable. Start the API to see recordings made in the PWA.</p>}
@@ -539,13 +603,37 @@ function ManagerApp() {
     </div>;
   }
 
+  function renderOverview() {
+    return <OverviewPanel
+      conversations={conversations}
+      captures={filteredFieldCaptures}
+      totalCaptureCount={fieldCaptureTotal}
+      captureState={captureApiState}
+      periodLabel={period === '7' ? 'Last 7 days' : period === '30' ? 'Last 30 days' : 'all dates'}
+      onOpenInsights={() => setView('insights')}
+      onOpenVisits={() => setView('visits')}
+    />;
+  }
+
+  function renderTranscriptImport() {
+    return <TranscriptImportForm
+      busy={transcriptImportBusy}
+      storageConfigured={captureRuntime?.uploads === 'configured'}
+      status={transcriptImportStatus ?? (transcriptApiState === 'unavailable'
+        ? { kind: 'error', message: 'The API is unavailable. Start or refresh the API connection, then retry the transcript.' }
+        : null)}
+      onIngest={ingestManualTranscript}
+    />;
+  }
+
   function renderInsights() {
-    if (!conversations.length) return <>{renderLiveCapturePreview()}<div className="empty-state"><Icon name="search"/><h2>No synthetic conversations match these filters</h2><p>Live PWA captures remain available above. Change the date range or clear a territory, representative, or outlet search to see the demo report.</p><button className="button" onClick={() => { setPeriod('all'); setTerritory('all'); setRepresentative('all'); setSearch(''); }}>Show all demo conversations</button></div></>;
+    if (!conversations.length) return <>{renderTranscriptImport()}{renderLiveCapturePreview()}<div className="empty-state"><Icon name="search"/><h2>No analyzed conversations match these filters</h2><p>Import a consented transcript below or change the date range and filters to review the seeded demo reports.</p><button className="button" onClick={() => { setPeriod('all'); setTerritory('all'); setRepresentative('all'); setSearch(''); }}>Show all reports</button></div></>;
     return <>
+      {renderTranscriptImport()}
       {renderLiveCapturePreview()}
       <div className="pulse-strip" aria-label="Field pulse">
         <div className="pulse-item"><span>Analyzed visits</span><strong>{formatCount(analyzedCount)}</strong><small>in selected period</small></div>
-        <div className="pulse-item"><span>Unique outlets</span><strong>{formatCount(outletCount)}</strong><small>distinct shopkeepers</small></div>
+          <div className="pulse-item"><span>Unique outlets</span><strong>{formatCount(outletCount)}</strong><small>distinct shopkeepers</small></div>
         <div className="pulse-item"><span>Confirmed orders</span><strong>{formatCount(orderCount)}</strong><small>stated in conversation</small></div>
         <div className="pulse-item"><span>Follow-ups agreed</span><strong>{formatCount(followUpCount)}</strong><small>explicit next steps</small></div>
         <div className="pulse-item pulse-value"><span>Stated order value</span><strong>₹{formatCount(totalExplicitOrderValue)}</strong><small>{orderValues.length} value(s) explicitly stated</small></div>
@@ -601,11 +689,11 @@ function ManagerApp() {
         </aside>
       </div>
 
-      <div className="reporting-heading"><div><h2>Read the field pattern</h2><p>Reach, outcome, timing, and coaching evidence from the filtered conversations.</p></div><span className="synthetic-badge">SYNTHETIC DATA</span></div>
+      <div className="reporting-heading"><div><h2>Read the field pattern</h2><p>Reach, outcome, timing, and coaching evidence from the filtered conversations.</p></div><span className="synthetic-badge">{conversations.some((item) => item.source === 'manual_transcript') ? 'SYNTHETIC + IMPORTED REPORTS' : 'SYNTHETIC DATA'}</span></div>
       <div className="chart-grid">
-        <section className="chart-panel chart-wide"><div className="chart-heading"><div><h3>Conversation outcomes over time</h3><p>Visits, confirmed orders, and agreed follow-ups by capture date.</p></div><button className="icon-button" title="Open visit history" aria-label="Open visit history" onClick={() => setView('visits')}><Icon name="arrow"/></button></div>
+        <section className="chart-panel chart-wide"><div className="chart-heading"><div><h3>Conversation outcomes over time</h3><p>Seeded capture dates and manually supplied conversation dates; otherwise manual imports use their import date.</p></div><button className="icon-button" title="Open visit history" aria-label="Open visit history" onClick={() => setView('visits')}><Icon name="arrow"/></button></div>
           <ReportChart type="area" height={260} options={trendOptions} series={[{ name: 'Visits', data: trendBuckets.map((item) => item.visits) }, { name: 'Order placed', data: trendBuckets.map((item) => item.orders) }, { name: 'Follow-up', data: trendBuckets.map((item) => item.followUps) }]} />
-          <div className="data-table-wrap"><table><caption>Visits by capture date</caption><thead><tr><th>Date</th><th>Visits</th><th>Orders</th><th>Follow-ups</th></tr></thead><tbody>{trendBuckets.map((row) => <tr key={row.label}><th scope="row">{row.label}</th><td>{row.visits}</td><td>{row.orders}</td><td>{row.followUps}</td></tr>)}</tbody></table></div>
+          <div className="data-table-wrap"><table><caption>Reports by conversation or import date</caption><thead><tr><th>Date</th><th>Visits</th><th>Orders</th><th>Follow-ups</th></tr></thead><tbody>{trendBuckets.map((row) => <tr key={row.label}><th scope="row">{row.label}</th><td>{row.visits}</td><td>{row.orders}</td><td>{row.followUps}</td></tr>)}</tbody></table></div>
         </section>
         <section className="chart-panel"><div className="chart-heading"><div><h3>Signal reach</h3><p>Distinct visits supporting each normalized theme.</p></div></div>
           <ReportChart type="bar" height={Math.max(230, categoryRows.length * 38)} options={categoryOptions} series={[{ name: 'Distinct visits', data: categoryRows.map((row) => row.distinctVisitCount) }]} />
@@ -615,9 +703,9 @@ function ManagerApp() {
           <ReportChart type="donut" height={244} options={outcomeOptions} series={outcomeRows.map((item) => item.count)} />
           <div className="outcome-list">{outcomeRows.map((row) => <div key={row.label}><span className="legend-dot" style={{ background: row.color }}/><span>{row.label}</span><strong>{row.count}</strong></div>)}</div>
         </section>
-        <section className="chart-panel chart-wide"><div className="chart-heading"><div><h3>Shopkeeper response cues</h3><p>Synthetic conversation cues for review; not a measure of personal sentiment.</p></div></div>
-          <ReportChart type="bar" height={132} options={sentimentOptions} series={sentimentRows.map((row, index) => ({ name: row.label, data: [row.count], color: [palette.green, '#829889', '#d2a45e', '#b16a44'][index] }))} />
-          <div className="cue-list">{sentimentRows.map((row, index) => <span key={row.label}><i style={{ background: [palette.green, '#829889', '#d2a45e', '#b16a44'][index] }}/>{row.label} <strong>{row.count}</strong></span>)}</div>
+        <section className="chart-panel chart-wide"><div className="chart-heading"><div><h3>Shopkeeper response cues</h3><p>Transcript cues for review; “unknown” means the text did not support a clear cue.</p></div></div>
+          <ReportChart type="bar" height={132} options={sentimentOptions} series={sentimentRows.map((row, index) => ({ name: row.label, data: [row.count], color: [palette.green, '#829889', '#d2a45e', '#b16a44', '#b7c0ba'][index] }))} />
+          <div className="cue-list">{sentimentRows.map((row, index) => <span key={row.label}><i style={{ background: [palette.green, '#829889', '#d2a45e', '#b16a44', '#b7c0ba'][index] }}/>{row.label} <strong>{row.count}</strong></span>)}</div>
         </section>
         <section className="chart-panel chart-wide"><div className="chart-heading"><div><h3>Pack and product demand by territory</h3><p>Cells count visits with a supported mention. Zero means no mention was extracted here, not that a need is absent.</p></div></div>
           <ReportChart type="heatmap" height={Math.max(190, demandHeatmapSeries.length * 44)} options={demandHeatmapOptions} series={demandHeatmapSeries} />
@@ -637,14 +725,14 @@ function ManagerApp() {
         </section>
       </div>
       <section className="insight-review-table"><div className="section-heading"><div><h2>Follow-ups from the conversation</h2><p>Only explicit commitments are listed; no inferred due dates are added.</p></div><button className="text-action" onClick={() => setView('visits')}>See all visits <Icon name="arrow"/></button></div>
-        <div className="follow-up-list">{conversations.filter((item) => item.outcome === 'follow_up').map((item) => <button className="follow-up-row" key={item.id} onClick={() => openVisit(item.id)}><span className="follow-up-indicator"/><span className="follow-up-main"><strong>{item.nextAction ?? item.summary}</strong><small>{item.outletName} · {item.representativeName} · {item.territoryName}</small></span><span className="follow-up-due">{item.nextActionDue ? formatDateTime(item.nextActionDue) : 'Date not stated'}</span><Icon name="arrow"/></button>)}{!conversations.some((item) => item.outcome === 'follow_up') && <p className="empty-inline">No follow-ups in this filtered period.</p>}</div>
+        <div className="follow-up-list">{conversations.filter((item) => item.outcome === 'follow_up').map((item) => <button className="follow-up-row" key={item.id} onClick={() => openVisit(item.id)}><span className="follow-up-indicator"/><span className="follow-up-main"><strong>{item.nextAction ?? item.summary}</strong><small>{item.outletName} · {item.representativeName ?? item.representativeId} · {item.territoryName ?? item.territoryId}</small></span><span className="follow-up-due">{item.nextActionDue ? formatDueLabel(item.nextActionDue) : 'Date not stated'}</span><Icon name="arrow"/></button>)}{!conversations.some((item) => item.outcome === 'follow_up') && <p className="empty-inline">No follow-ups in this filtered period.</p>}</div>
       </section>
     </>;
   }
 
   function renderTeam() {
-    return <section className="directory-section"><div className="directory-header"><div><h2>Field activity, with source evidence</h2><p>Use the representative filter to narrow the team view. No composite rep score is calculated.</p></div><span className="synthetic-badge">SYNTHETIC DATA</span></div>
-      <div className="team-table-wrap"><table><caption>Visits and conversation evidence by representative</caption><thead><tr><th>Representative</th><th>Visits</th><th>Explicit orders</th><th>Follow-ups</th><th>Evidence-linked signals</th><th>Territories</th></tr></thead><tbody>{representativeRows.map((rep) => <tr key={rep.name}><th scope="row"><span className="rep-cell"><i>{rep.initials}</i>{rep.name}</span></th><td>{rep.visits}</td><td>{rep.orders}</td><td>{rep.followUps}</td><td>{rep.evidence}</td><td>{[...new Set(conversations.filter((item) => item.representativeName === rep.name).map((item) => item.territoryName))].join(', ') || '—'}</td></tr>)}</tbody></table></div>
+    return <section className="directory-section"><div className="directory-header"><div><h2>Field activity, with source evidence</h2><p>Use the representative filter to narrow the team view. No composite rep score is calculated.</p></div><span className="synthetic-badge">{conversations.some((item) => item.source === 'manual_transcript') ? 'SYNTHETIC + IMPORTED REPORTS' : 'SYNTHETIC DATA'}</span></div>
+      <div className="team-table-wrap"><table><caption>Visits and conversation evidence by representative</caption><thead><tr><th>Representative</th><th>Visits</th><th>Explicit orders</th><th>Follow-ups</th><th>Evidence-linked signals</th><th>Territories</th></tr></thead><tbody>{representativeRows.map((rep) => <tr key={rep.name}><th scope="row"><span className="rep-cell"><i>{rep.initials}</i>{rep.name}</span></th><td>{rep.visits}</td><td>{rep.orders}</td><td>{rep.followUps}</td><td>{rep.evidence}</td><td>{[...new Set(conversations.filter((item) => (item.representativeName ?? item.representativeId) === rep.name).map((item) => item.territoryName ?? item.territoryId))].join(', ') || '—'}</td></tr>)}</tbody></table></div>
       <div className="team-evidence-note"><strong>Evidence-led coaching</strong><p>Each conversation record includes supported discovery, objection response, and close/next-step signals where available. Review the cited segments before coaching; an absent signal means it was not found in the transcript, not that the rep failed.</p></div>
     </section>;
   }
@@ -652,7 +740,7 @@ function ManagerApp() {
   function renderFieldPwaCaptures() {
     return <section className="field-pwa-captures" aria-labelledby="field-pwa-captures-title" aria-busy={captureRefreshing}>
       <div className="field-pwa-header">
-        <div><h2 id="field-pwa-captures-title">Field PWA captures</h2><p>Real recording metadata and uploaded audio, kept separate from synthetic report totals. Transcripts are not available yet; timestamps use the PWA capture start time.</p></div>
+        <div><h2 id="field-pwa-captures-title">Field PWA captures</h2><p>Real recording metadata and uploaded audio, kept separate from conversation reports. PWA transcription is not connected yet; timestamps here are the capture start time.</p></div>
         <div className="field-pwa-actions">
           <span className={`field-pwa-api-status ${captureApiState}`} role="status" aria-live="polite"><i aria-hidden="true"/>{captureApiState === 'loading' ? 'Connecting to API' : captureApiState === 'available' ? 'API connected' : 'API unavailable'}</span>
           <button className="button" type="button" onClick={() => void refreshFieldCaptures()} disabled={captureRefreshing}>{captureRefreshing ? 'Refreshing…' : 'Refresh'}</button>
@@ -696,9 +784,9 @@ function ManagerApp() {
   }
 
   function renderVisits() {
-    const rows = [...conversations].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    return <>{renderFieldPwaCaptures()}<section className="directory-section"><div className="directory-header"><div><h2>Synthetic visit history</h2><p>Transcript review is linked to the source conversation. Synthetic records do not include audio files.</p></div><span className="synthetic-badge">SYNTHETIC DATA</span></div>
-      <div className="visit-list">{rows.map((item) => <button className="visit-row" key={item.id} onClick={() => openVisit(item.id)}><span className={`visit-status ${item.outcome}`} aria-hidden="true"/><span className="visit-cell visit-outlet"><strong>{item.outletName}</strong><small>{item.city} · {item.territoryName}</small></span><span className="visit-cell"><strong>{item.representativeName}</strong><small>{formatDateTime(item.createdAt)}</small></span><span className="visit-cell"><strong>{outcomeLabel(item.outcome)}</strong><small>{formatDuration(item.durationSeconds)} conversation</small></span><span className="visit-cell visit-summary"><strong>{item.summary}</strong><small>{item.insights.length} evidence-backed insight{item.insights.length === 1 ? '' : 's'}</small></span><Icon name="arrow"/></button>)}{!rows.length && <div className="empty-inline">No visits match the current filters.</div>}</div>
+    const rows = [...conversations].sort((a, b) => conversationDateKey(b).localeCompare(conversationDateKey(a)));
+    return <>{renderFieldPwaCaptures()}<section className="directory-section"><div className="directory-header"><div><h2>Conversation report history</h2><p>Seeded examples and manually imported transcript reports are labeled by source. Text-only imports have no audio or inferred duration.</p></div><span className="synthetic-badge">{rows.some((item) => item.source === 'manual_transcript') ? 'SYNTHETIC + IMPORTED REPORTS' : 'SYNTHETIC DATA'}</span></div>
+      <div className="visit-list">{rows.map((item) => <button className="visit-row" key={item.id} onClick={() => openVisit(item.id)}><span className={`visit-status ${item.outcome}`} aria-hidden="true"/><span className="visit-cell visit-outlet"><strong>{item.outletName}</strong><small>{item.city ?? 'Location not provided'} · {item.territoryName ?? item.territoryId}</small></span><span className="visit-cell"><strong>{item.representativeName ?? item.representativeId}</strong><small>{item.source === 'manual_transcript' ? item.conversationDate ? `Conversation ${formatDateOnly(item.conversationDate)}` : `Imported ${formatDateTime(item.createdAt)}` : formatDateTime(item.createdAt)} <span className={`source-chip ${item.source === 'manual_transcript' ? 'manual' : 'synthetic'}`}>{item.source === 'manual_transcript' ? 'Manual transcript' : 'Seeded demo'}</span></small></span><span className="visit-cell"><strong>{outcomeLabel(item.outcome)}</strong><small>{item.durationSeconds === undefined ? 'Duration not provided' : `${formatDuration(item.durationSeconds)} conversation`}</small></span><span className="visit-cell visit-summary"><strong>{item.summary}</strong><small>{item.insights.length} evidence-backed insight{item.insights.length === 1 ? '' : 's'}</small></span><Icon name="arrow"/></button>)}{!rows.length && <div className="empty-inline">No visits match the current filters.</div>}</div>
     </section></>;
   }
 
@@ -711,32 +799,36 @@ function ManagerApp() {
         <button title="Field team" aria-label="Field team" className={view === 'team' ? 'active' : ''} onClick={() => setView('team')}><Icon name="team"/>Field team</button>
         <button title="Visit history" aria-label="Visit history" className={view === 'visits' ? 'active' : ''} onClick={() => setView('visits')}><Icon name="list"/>Visit history</button>
       </nav>
-      <div className="rail-status"><span className="rail-status-icon"><i/></span><span><strong>Demo workspace</strong><small>Report data is synthetic</small></span></div>
+      <div className="rail-status"><span className="rail-status-icon"><i/></span><span><strong>Demo workspace</strong><small>Seeded + imported reports</small></span></div>
       <div className="rail-user"><span className="user-avatar">AS</span><span><strong>Ananya Shah</strong><small>Field Source Manager</small></span><button aria-label="Manager profile menu" className="more-button">···</button></div>
     </aside>
 
     <main className="workspace-main">
       <header className="topbar"><div className="breadcrumbs"><span>Reports</span><i>/</i><strong>{view === 'team' ? 'Field team' : view === 'visits' ? 'Visit history' : view === 'overview' ? 'Overview' : 'Conversation insights'}</strong></div>
-        <div className="topbar-tools">{renderFilters()}<span className="demo-pill"><i/>SYNTHETIC DEMO</span></div>
+        <div className="topbar-tools">{renderFilters()}<span className="demo-pill"><i/>{manualTranscripts.length ? 'DEMO + TRANSCRIPTS' : 'SYNTHETIC DEMO'}</span></div>
       </header>
       <div className="page-content">
-        <div className="page-title-row"><div><h1>{viewTitle[view]}</h1><p>{view === 'insights' ? selectedSignal ? <><strong>{selectedSignal.rawMentionCount} mentions</strong> from <strong>{selectedSignal.distinctOutletCount} unique outlets</strong> across {selectedSignal.territories.length} territories {period === '7' ? 'in the last 7 days' : period === '30' ? 'in the last 30 days' : 'in the selected demo data'}. Every factual finding links to its conversation.</> : 'No supported signals in this range.' : view === 'team' ? 'Coverage, commitments, and evidence across the selected team.' : view === 'visits' ? 'Synthetic visit fixtures and live PWA captures are shown in separate sections.' : 'A reviewable view of what is happening on the ground.'}</p></div>
-          <div className="title-actions"><label className="search-control"><Icon name="search"/><span className="sr-only">Search outlets or representatives</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search outlet or rep"/></label><button className="button export-button" onClick={() => window.print()}><Icon name="print"/>Print report</button></div>
+        <div className="page-title-row"><div><h1>{viewTitle[view]}</h1><p>{view === 'insights' ? selectedSignal ? <><strong>{selectedSignal.rawMentionCount} mentions</strong> from <strong>{selectedSignal.distinctOutletCount} unique outlets</strong> across {selectedSignal.territories.length} territories {period === '7' ? 'in the last 7 days' : period === '30' ? 'in the last 30 days' : 'in the selected report data'}. Findings link to their source conversation.</> : 'No supported signals in this range.' : view === 'team' ? 'Coverage, commitments, and evidence across the selected team.' : view === 'visits' ? 'Seeded examples, transcript reports, and live PWA captures are listed separately.' : 'Coverage, declared outcomes, and capture sync across the field team.'}</p></div>
+          <div className="title-actions"><label className="search-control"><Icon name="search"/><span className="sr-only">Search outlets or representatives</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search outlet or rep"/></label>{view !== 'insights' && <button className="button" type="button" onClick={() => setView('insights')}>Import transcript</button>}<button className="button export-button" onClick={() => window.print()}><Icon name="print"/>Print report</button></div>
         </div>
 
-        {view === 'insights' || view === 'overview' ? renderInsights() : view === 'team' ? renderTeam() : renderVisits()}
-        <footer className="page-footnote"><span>{demoDataNotice}</span><span>Live uploaded audio is shown separately from synthetic reports.</span></footer>
+        {view === 'overview' ? renderOverview() : view === 'insights' ? renderInsights() : view === 'team' ? renderTeam() : renderVisits()}
+        <footer className="page-footnote"><span>{manualTranscripts.length ? `${demoDataNotice} Manual reports are derived from the imported text shown with each report.` : demoDataNotice}</span><span>Live uploaded audio stays separate from transcript-derived conversation reports.</span></footer>
       </div>
     </main>
 
     {detailVisit && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setVisitId(null); }}><section ref={dialogRef} className="visit-dialog" role="dialog" aria-modal="true" aria-labelledby="visit-title" tabIndex={-1}>
-      <header className="dialog-header"><div><span className="dialog-kicker">SYNTHETIC TRANSCRIPT · NO AUDIO</span><h2 id="visit-title">{detailVisit.outletName}</h2><p>{detailVisit.representativeName} · {detailVisit.territoryName} · {formatDateTime(detailVisit.createdAt)}</p></div><button ref={dialogCloseRef} className="icon-button close-button" aria-label="Close transcript" onClick={() => setVisitId(null)}><Icon name="close"/></button></header>
-      <div className="dialog-meta"><span className="outcome-tag">{outcomeLabel(detailVisit.outcome)}</span><span>{formatDuration(detailVisit.durationSeconds)}</span>{detailVisit.confirmedOrderValueInr !== undefined && <strong>₹{formatCount(detailVisit.confirmedOrderValueInr)} explicitly stated</strong>}</div>
+      <header className="dialog-header"><div><span className="dialog-kicker">{detailVisit.source === 'manual_transcript' ? `MANUAL TRANSCRIPT · ${manualTranscripts.find((item) => item.id === detailVisit.id)?.storageState === 's3' ? 'SOURCE IN S3' : 'TEXT ONLY'}` : 'SYNTHETIC TRANSCRIPT · NO AUDIO'}</span><h2 id="visit-title">{detailVisit.outletName}</h2><p>{detailVisit.representativeName ?? detailVisit.representativeId} · {detailVisit.territoryName ?? detailVisit.territoryId} · {detailVisit.source === 'manual_transcript' ? detailVisit.conversationDate ? `Conversation ${formatDateOnly(detailVisit.conversationDate)}` : `Imported ${formatDateTime(detailVisit.createdAt)}` : formatDateTime(detailVisit.createdAt)}</p></div><button ref={dialogCloseRef} className="icon-button close-button" aria-label="Close transcript" onClick={() => setVisitId(null)}><Icon name="close"/></button></header>
+      <div className="dialog-meta"><span className="outcome-tag">{outcomeLabel(detailVisit.outcome)}</span><span>{detailVisit.durationSeconds === undefined ? 'Duration not provided' : formatDuration(detailVisit.durationSeconds)}</span>{detailVisit.confirmedOrderValueInr !== undefined && <strong>₹{formatCount(detailVisit.confirmedOrderValueInr)} explicitly stated</strong>}</div>
       <p className="dialog-summary">{detailVisit.summary}</p>
       <div className="transcript-list" aria-label="Transcript segments">{detailVisit.transcript.map((segment) => {
-        const isEvidence = selectedSignal?.examples.some((example) => example.visitId === detailVisit.id && example.segmentIds.includes(segment.id)) ?? false;
-        return <article className={`transcript-segment ${segment.speaker} ${isEvidence ? 'is-evidence' : ''}`} key={segment.id}><time>{minutes(Math.floor(segment.startMs / 1000))}</time><div><span className="speaker-label">{segment.speaker === 'shopkeeper' ? 'Shopkeeper' : segment.speaker === 'representative' ? detailVisit.representativeName : 'Unidentified speaker'}</span><p>{segment.text}</p></div>{isEvidence && <span className="segment-marker">Evidence</span>}</article>;
+        const isEvidence = detailVisit.outcomeEvidenceSegmentIds.includes(segment.id)
+          || (detailVisit.nextActionEvidenceSegmentIds?.includes(segment.id) ?? false)
+          || detailVisit.insights.some((insight) => insight.evidence.some((evidence) => evidence.segmentIds.includes(segment.id)))
+          || detailVisit.coachingSignals.some((signal) => signal.evidenceSegmentIds.includes(segment.id));
+        return <article className={`transcript-segment ${segment.speaker} ${isEvidence ? 'is-evidence' : ''}`} key={segment.id}><time>{segment.startMs === undefined ? 'Time not provided' : minutes(Math.floor(segment.startMs / 1000))}</time><div><span className="speaker-label">{segment.speaker === 'shopkeeper' ? 'Shopkeeper' : segment.speaker === 'representative' ? detailVisit.representativeName ?? detailVisit.representativeId : 'Unidentified speaker'}</span><p>{segment.text}</p></div>{isEvidence && <span className="segment-marker">Evidence</span>}</article>;
       })}</div>
+      {originalTranscriptText && <details className="source-transcript-raw"><summary>Show original imported transcript</summary><pre>{originalTranscriptText}</pre></details>}
       <div className="dialog-insights"><h3>Extracted signals and coaching evidence</h3>{detailVisit.insights.map((insight) => <div className="dialog-insight" key={insight.id}><span className={`category-tag category-${insight.category}`}>{categoryLabel(insight.category)}</span><strong>{insight.title}</strong><p>{insight.summary}</p><small>{insight.explicitness} · {insight.confidence} confidence · {insight.mentionCount} supported mention{insight.mentionCount === 1 ? '' : 's'}</small>{insight.evidence.map((evidence) => <blockquote key={evidence.segmentIds.join('-')}>{evidence.quote}</blockquote>)}</div>)}
         {detailVisit.coachingSignals.length > 0 && <div className="coaching-details"><h4>Coaching evidence</h4>{detailVisit.coachingSignals.map((item) => <p key={item.rubricKey}><strong>{item.label}</strong><span>{item.note}</span></p>)}</div>}
       </div>

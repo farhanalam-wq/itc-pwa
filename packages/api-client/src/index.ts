@@ -1,11 +1,15 @@
 import type { ApiError, HealthResponse } from '@itc/contracts';
-import type { AnalysisState, RecordingMetadata, SyncState } from '@itc/domain';
+import type { AnalysisState, ManualTranscriptAnalysis, RecordingMetadata, SyncState } from '@itc/domain';
+export type { ManualTranscriptAnalysis } from '@itc/domain';
 
 export interface ApiClientOptions {
   baseUrl: string;
   getAccessToken?: () => Promise<string | undefined>;
   fetcher?: typeof fetch;
+  requestTimeoutMs?: number;
 }
+
+const DEFAULT_API_REQUEST_TIMEOUT_MS = 25_000;
 
 export interface ApiRuntimeHealth {
   persistence: 'in-memory-demo';
@@ -59,6 +63,22 @@ export interface RecordingPage {
   nextOffset: number | null;
 }
 
+export interface CreateManualTranscriptRequest {
+  fileName: string;
+  outletName: string;
+  representativeId: string;
+  territoryId: string;
+  transcriptText: string;
+  createdAt?: string;
+  conversationDate?: string;
+  consentConfirmed: boolean;
+}
+
+export interface ManualTranscriptPage {
+  transcripts: ManualTranscriptAnalysis[];
+  total: number;
+}
+
 export class ApiClientError extends Error {
   constructor(
     message: string,
@@ -81,6 +101,9 @@ export interface ApiClient {
   createRecordingUploadUrl(recordingId: string): Promise<SignedRecordingUrl>;
   completeRecordingUpload(recordingId: string): Promise<RecordingMetadata>;
   getRecordingDownloadUrl(recordingId: string): Promise<SignedRecordingUrl>;
+  ingestTranscript(input: CreateManualTranscriptRequest): Promise<ManualTranscriptAnalysis>;
+  listTranscripts(): Promise<ManualTranscriptPage>;
+  getTranscript(transcriptId: string): Promise<ManualTranscriptAnalysis>;
 }
 
 export function createApiClientOptions(baseUrl: string): ApiClientOptions {
@@ -116,10 +139,33 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
     if (token) headers.set('Authorization', 'Bearer ' + token);
 
     let response: Response;
+    const controller = new AbortController();
+    let didTimeout = false;
+    const timeoutMs = Math.max(1, options.requestTimeoutMs ?? DEFAULT_API_REQUEST_TIMEOUT_MS);
+    const timeout = setTimeout(() => {
+      didTimeout = true;
+      controller.abort();
+    }, timeoutMs);
+    const forwardAbort = () => controller.abort(init.signal?.reason);
+    if (init.signal?.aborted) forwardAbort();
+    else init.signal?.addEventListener('abort', forwardAbort, { once: true });
     try {
-      response = await fetcher(baseUrl + path, { ...init, headers });
+      response = await fetcher(baseUrl + path, { ...init, headers, signal: controller.signal });
     } catch (error) {
+      if (didTimeout) {
+        throw new ApiClientError(
+          init.method === 'POST' && path === '/v1/transcripts'
+            ? 'Transcript import timed out. Check API connectivity, AWS credentials, and s3:PutObject access, then retry.'
+            : 'The API request timed out. Check the API connection, then retry.',
+          0,
+          'request_timeout',
+          true
+        );
+      }
       throw new ApiClientError(errorMessage(error), 0, undefined, true);
+    } finally {
+      clearTimeout(timeout);
+      init.signal?.removeEventListener('abort', forwardAbort);
     }
 
     const payload: unknown = await response.json().catch(() => undefined);
@@ -173,6 +219,14 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
     ),
     getRecordingDownloadUrl: (recordingId) => request<SignedRecordingUrl>(
       '/v1/recordings/' + encodeURIComponent(recordingId) + '/download-url'
+    ),
+    ingestTranscript: (input) => request<ManualTranscriptAnalysis>('/v1/transcripts', {
+      method: 'POST',
+      body: JSON.stringify(input)
+    }),
+    listTranscripts: () => request<ManualTranscriptPage>('/v1/transcripts'),
+    getTranscript: (transcriptId) => request<ManualTranscriptAnalysis>(
+      '/v1/transcripts/' + encodeURIComponent(transcriptId)
     )
   };
 }

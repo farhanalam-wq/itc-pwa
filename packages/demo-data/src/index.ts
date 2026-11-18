@@ -2,6 +2,7 @@ import type {
   Confidence,
   ConversationInsight,
   InsightCategory,
+  SentimentCue,
   TranscriptSegment,
   VisitOutcome
 } from '@itc/domain';
@@ -11,7 +12,7 @@ export const demoDataNotice =
   'Synthetic demonstration data. These conversations, people, outlets, and figures are fictional; no audio is attached.';
 
 export type InsightExplicitness = 'explicit' | 'inferred' | 'uncertain';
-export type ConversationCue = 'positive' | 'neutral' | 'hesitant' | 'at_risk';
+export type ConversationCue = SentimentCue;
 
 export interface DemoInsight extends ConversationInsight {
   taxonomyKey: string;
@@ -29,17 +30,18 @@ export interface DemoCoachingSignal {
 }
 
 export interface DemoConversation {
-  source: typeof demoDataMode;
+  source: typeof demoDataMode | 'manual_transcript';
   id: string;
   createdAt: string;
-  durationSeconds: number;
+  conversationDate?: string;
+  durationSeconds?: number;
   representativeId: string;
-  representativeName: string;
-  representativeInitials: string;
+  representativeName?: string;
+  representativeInitials?: string;
   territoryId: string;
-  territoryName: string;
-  city: string;
-  outletId: string;
+  territoryName?: string;
+  city?: string;
+  outletId?: string;
   outletName: string;
   outcome: VisitOutcome;
   outcomeEvidenceSegmentIds: string[];
@@ -49,6 +51,7 @@ export interface DemoConversation {
   sentimentConfidence: Confidence;
   summary: string;
   nextAction?: string;
+  nextActionEvidenceSegmentIds?: string[];
   nextActionDue?: string;
   productsDiscussed: string[];
   transcript: TranscriptSegment[];
@@ -766,6 +769,10 @@ export function aggregateDemoSignals(conversations: DemoConversation[] = demoCon
 
   const aggregates = new Map<string, MutableSignalAggregate>();
 
+  const outletKey = (conversation: DemoConversation) => conversation.outletId ?? `name:${conversation.outletName.trim().toLowerCase()}`;
+  const territoryName = (conversation: DemoConversation) => conversation.territoryName ?? conversation.territoryId;
+  const representativeName = (conversation: DemoConversation) => conversation.representativeName ?? conversation.representativeId;
+
   for (const conversation of conversations) {
     for (const item of conversation.insights) {
       const key = item.taxonomyKey;
@@ -795,8 +802,8 @@ export function aggregateDemoSignals(conversations: DemoConversation[] = demoCon
 
       aggregate.rawMentionCount += item.mentionCount;
       aggregate.visitIds.add(conversation.id);
-      aggregate.outletIds.add(conversation.outletId);
-      aggregate.territoryNames.add(conversation.territoryName);
+      aggregate.outletIds.add(outletKey(conversation));
+      aggregate.territoryNames.add(territoryName(conversation));
       aggregate.confidenceCounts[item.confidence] += 1;
 
       const territory = aggregate.territoryTallies.get(conversation.territoryId) ?? {
@@ -805,7 +812,7 @@ export function aggregateDemoSignals(conversations: DemoConversation[] = demoCon
         rawMentionCount: 0
       };
       territory.distinctVisitIds.add(conversation.id);
-      territory.distinctOutletIds.add(conversation.outletId);
+      territory.distinctOutletIds.add(outletKey(conversation));
       territory.rawMentionCount += item.mentionCount;
       aggregate.territoryTallies.set(conversation.territoryId, territory);
 
@@ -815,7 +822,7 @@ export function aggregateDemoSignals(conversations: DemoConversation[] = demoCon
         rawMentionCount: 0
       };
       representative.distinctVisitIds.add(conversation.id);
-      representative.distinctOutletIds.add(conversation.outletId);
+      representative.distinctOutletIds.add(outletKey(conversation));
       representative.rawMentionCount += item.mentionCount;
       aggregate.representativeTallies.set(conversation.representativeId, representative);
 
@@ -823,7 +830,7 @@ export function aggregateDemoSignals(conversations: DemoConversation[] = demoCon
         aggregate.examples.push({
           visitId: conversation.id,
           outletName: conversation.outletName,
-          representativeName: conversation.representativeName,
+          representativeName: representativeName(conversation),
           confidence: item.confidence,
           quote: itemEvidence.quote,
           segmentIds: itemEvidence.segmentIds
@@ -907,7 +914,7 @@ export function aggregateDemoDaily(conversations: DemoConversation[] = demoConve
     }
 
     daily.visitCount += 1;
-    daily.outletIds.add(conversation.outletId);
+    daily.outletIds.add(conversation.outletId ?? `name:${conversation.outletName.trim().toLowerCase()}`);
     daily.confirmedOrderValueInr += conversation.confirmedOrderValueInr ?? 0;
     if (conversation.outcome === 'order_placed') daily.orderCount += 1;
     if (conversation.outcome === 'follow_up') daily.followUpCount += 1;
@@ -974,14 +981,14 @@ export function aggregateDemoCoaching(conversations: DemoConversation[] = demoCo
 
       aggregate.signalCount += 1;
       aggregate.visitIds.add(conversation.id);
-      aggregate.outletIds.add(conversation.outletId);
+      aggregate.outletIds.add(conversation.outletId ?? `name:${conversation.outletName.trim().toLowerCase()}`);
       aggregate.representativeIds.add(conversation.representativeId);
       aggregate.confidenceCounts[signal.confidence] += 1;
       aggregate.examples.push({
         visitId: conversation.id,
         outletName: conversation.outletName,
-        territoryName: conversation.territoryName,
-        representativeName: conversation.representativeName,
+        territoryName: conversation.territoryName ?? conversation.territoryId,
+        representativeName: conversation.representativeName ?? conversation.representativeId,
         label: signal.label,
         confidence: signal.confidence,
         evidenceSegmentIds: signal.evidenceSegmentIds,

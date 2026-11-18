@@ -10,9 +10,15 @@ import type { RecordingMetadata } from '@itc/domain';
 export interface S3UploadConfig {
   region?: string;
   bucket?: string;
+  /** Prefix for date-partitioned audio objects. */
   prefix: string;
+  /** Prefix for date-partitioned plain-text transcript objects. */
+  transcriptPrefix: string;
   urlTtlSeconds: number;
 }
+
+const S3_CONNECTION_TIMEOUT_MS = 5_000;
+const S3_REQUEST_TIMEOUT_MS = 15_000;
 
 export interface SignedRecordingUrl {
   url: string;
@@ -22,7 +28,7 @@ export interface SignedRecordingUrl {
 
 export class UploadNotConfiguredError extends Error {
   constructor() {
-    super('S3 upload is not configured. Set AWS_REGION and S3_BUCKET for the API.');
+    super('S3 upload is not configured. Set AWS_REGION and S3_BUCKET_NAME for the API.');
     this.name = 'UploadNotConfiguredError';
   }
 }
@@ -38,8 +44,9 @@ export function readS3UploadConfig(env: Record<string, string | undefined> = Bun
   const ttl = Number(env.S3_PRESIGNED_URL_TTL_SECONDS ?? 900);
   return {
     region: env.AWS_REGION?.trim() || undefined,
-    bucket: env.S3_BUCKET?.trim() || undefined,
+    bucket: env.S3_BUCKET_NAME?.trim() || env.S3_BUCKET?.trim() || undefined,
     prefix: (env.S3_RECORDING_PREFIX ?? 'field-source/recordings').replace(/^\/+|\/+$/g, ''),
+    transcriptPrefix: (env.S3_TRANSCRIPT_PREFIX ?? 'field-source/transcripts').replace(/^\/+|\/+$/g, ''),
     urlTtlSeconds: Number.isFinite(ttl) ? Math.max(60, Math.min(3600, Math.floor(ttl))) : 900
   };
 }
@@ -51,13 +58,37 @@ function extensionFor(mimeType: string): string {
   return 'audio';
 }
 
+function dateParts(value: string): [string, string, string] {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return ['unknown', 'unknown', 'unknown'];
+  return [
+    String(date.getUTCFullYear()),
+    String(date.getUTCMonth() + 1).padStart(2, '0'),
+    String(date.getUTCDate()).padStart(2, '0')
+  ];
+}
+
+function safeFileName(value: string): string {
+  const leaf = value.split(/[\\/]/).pop()?.trim() ?? '';
+  const cleaned = leaf.replace(/[^a-zA-Z0-9._-]/g, '_').replace(/^\.+/, '');
+  return cleaned || 'transcript.txt';
+}
+
 export class S3RecordingUploads {
   readonly config: S3UploadConfig;
   private readonly client: S3Client | undefined;
 
   constructor(config = readS3UploadConfig()) {
     this.config = config;
-    this.client = config.region && config.bucket ? new S3Client({ region: config.region }) : undefined;
+    this.client = config.region && config.bucket ? new S3Client({
+      region: config.region,
+      maxAttempts: 1,
+      requestHandler: {
+        connectionTimeout: S3_CONNECTION_TIMEOUT_MS,
+        requestTimeout: S3_REQUEST_TIMEOUT_MS,
+        throwOnRequestTimeout: true
+      }
+    }) : undefined;
   }
 
   get configured(): boolean {
@@ -65,14 +96,34 @@ export class S3RecordingUploads {
   }
 
   objectKeyFor(recording: RecordingMetadata): string {
-    const date = new Date(recording.startedAt);
-    const year = Number.isNaN(date.getTime()) ? 'unknown' : String(date.getUTCFullYear());
-    const month = Number.isNaN(date.getTime()) ? 'unknown' : String(date.getUTCMonth() + 1).padStart(2, '0');
-    const day = Number.isNaN(date.getTime()) ? 'unknown' : String(date.getUTCDate()).padStart(2, '0');
-    const path = [this.config.prefix, year, month, day, `${encodeURIComponent(recording.id)}.${extensionFor(recording.mimeType)}`]
+    const path = [this.config.prefix, ...dateParts(recording.startedAt), `${encodeURIComponent(recording.id)}.${extensionFor(recording.mimeType)}`]
       .filter(Boolean)
       .join('/');
     return path;
+  }
+
+  /** Persist an uploaded transcript as UTF-8 text in its own S3 prefix. */
+  async storeTranscript(input: {
+    id: string;
+    createdAt: string;
+    fileName: string;
+    text: string;
+  }): Promise<{ objectKey: string }> {
+    const { client, bucket } = this.requireConfigured();
+    const objectKey = [
+      this.config.transcriptPrefix,
+      ...dateParts(input.createdAt),
+      encodeURIComponent(input.id),
+      safeFileName(input.fileName)
+    ].filter(Boolean).join('/');
+
+    await client.send(new PutObjectCommand({
+      Bucket: bucket,
+      Key: objectKey,
+      Body: input.text,
+      ContentType: 'text/plain; charset=utf-8'
+    }));
+    return { objectKey };
   }
 
   async createUploadUrl(recording: RecordingMetadata, objectKey: string): Promise<SignedRecordingUrl> {
