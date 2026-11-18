@@ -27,7 +27,7 @@ function offlineShellPlugin(): Plugin {
 
 const apiProxy = {
   '/api': {
-    target: 'http://localhost:3002',
+    target: 'http://localhost:3004',
     changeOrigin: true,
     rewrite: (path: string) => path.replace(/^\/api/, '')
   }

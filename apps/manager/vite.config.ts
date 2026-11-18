@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react';
 
 const apiProxy = {
   '/api': {
-    target: 'http://localhost:3002',
+    target: 'http://localhost:3004',
     changeOrigin: true,
     rewrite: (path: string) => path.replace(/^\/api/, '')
   }
@@ -11,6 +11,6 @@ const apiProxy = {
 
 export default defineConfig({
   plugins: [react()],
-  server: { port: 5174, strictPort: true, proxy: apiProxy },
-  preview: { proxy: apiProxy }
+  server: { port: 5180, strictPort: true, proxy: apiProxy },
+  preview: { port: 4180, strictPort: true, proxy: apiProxy }
 });
