@@ -1,0 +1,16 @@
+:root {
+  font-family: 'Hanken Grotesk Variable', 'Hanken Grotesk', sans-serif;
+  color: #18211b;
+  background: #f6f7f2;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; min-height: 100vh; }
+.shell { width: min(760px, calc(100% - 48px)); margin: 12vh auto; }
+.eyebrow { color: #176647; font-size: 12px; font-weight: 700; letter-spacing: .14em; }
+h1 { margin: 24px 0 12px; font-size: 4rem; line-height: .98; letter-spacing: -.045em; }
+.shell > p:not(.eyebrow) { max-width: 540px; color: #718078; font-size: 17px; line-height: 1.55; }
+.state { display: inline-flex; margin-top: 22px; padding: 9px 12px; border-radius: 999px; background: #e8eee5; color: #176647; font-size: 13px; }
+@media (max-width: 600px) { h1 { font-size: 2.75rem; } }

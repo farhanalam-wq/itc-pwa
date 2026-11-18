@@ -1,0 +1,25 @@
+{
+  "name": "itc-field-source",
+  "private": true,
+  "packageManager": "bun@1.4.2",
+  "engines": {
+    "bun": ">=1.4.0"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "turbo run dev",
+    "dev:field": "turbo run dev --filter=@itc/field-pwa",
+    "dev:manager": "turbo run dev --filter=@itc/manager",
+    "dev:api": "turbo run dev --filter=@itc/api",
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "clean": "turbo run clean"
+  },
+  "devDependencies": {
+    "turbo": "^2.5.0",
+    "typescript": "^5.7.2"
+  }
+}

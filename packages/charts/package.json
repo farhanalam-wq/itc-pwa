@@ -1,0 +1,20 @@
+{
+  "name": "@itc/charts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "apexcharts": "^8.0.0",
+    "react-apexcharts": "^2.2.0"
+  },
+  "peerDependencies": { "react": "^19.0.0" },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "typescript": "^5.7.2"
+  }
+}

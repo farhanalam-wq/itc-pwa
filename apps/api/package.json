@@ -1,0 +1,21 @@
+{
+  "name": "@itc/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "build": "bun build src/index.ts --outdir dist --target=bun",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@itc/contracts": "workspace:*",
+    "@itc/domain": "workspace:*",
+    "elysia": "2.0.0-rc.3"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.0",
+    "typescript": "^5.7.2"
+  }
+}
