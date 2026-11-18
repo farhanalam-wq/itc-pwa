@@ -1,8 +1,158 @@
+import type { ApiError, HealthResponse } from '@itc/contracts';
+import type { AnalysisState, RecordingMetadata, SyncState } from '@itc/domain';
+
 export interface ApiClientOptions {
   baseUrl: string;
   getAccessToken?: () => Promise<string | undefined>;
+  fetcher?: typeof fetch;
+}
+
+export interface ApiRuntimeHealth {
+  persistence: 'in-memory-demo';
+  uploads: 'not-configured';
+  analysis: 'not-configured';
+}
+
+export type ApiHealthResponse = HealthResponse & { runtime: ApiRuntimeHealth };
+
+export interface VisitRecord {
+  id: string;
+  outletName: string;
+  representativeId: string;
+  territoryId: string;
+  consentRecordedAt: string;
+  createdAt: string;
+  recordingIds: string[];
+}
+
+export interface CreateVisitRequest {
+  id: string;
+  outletName: string;
+  representativeId: string;
+  territoryId: string;
+  consentRecordedAt: string;
+}
+
+export type CreateRecordingRequest = Pick<
+  RecordingMetadata,
+  'id' | 'startedAt' | 'durationSeconds' | 'mimeType' | 'byteLength'
+>;
+
+export interface ListRecordingsQuery {
+  syncState?: SyncState;
+  analysisState?: AnalysisState;
+  representativeId?: string;
+  territoryId?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface RecordingPage {
+  recordings: RecordingMetadata[];
+  total: number;
+  nextOffset: number | null;
+}
+
+export class ApiClientError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+    readonly retryable = false
+  ) {
+    super(message);
+    this.name = 'ApiClientError';
+  }
+}
+
+export interface ApiClient {
+  getHealth(): Promise<ApiHealthResponse>;
+  createVisit(input: CreateVisitRequest): Promise<VisitRecord>;
+  getVisit(visitId: string): Promise<VisitRecord>;
+  createVisitRecording(visitId: string, input: CreateRecordingRequest): Promise<RecordingMetadata>;
+  getRecording(recordingId: string): Promise<RecordingMetadata>;
+  listRecordings(query?: ListRecordingsQuery): Promise<RecordingPage>;
 }
 
 export function createApiClientOptions(baseUrl: string): ApiClientOptions {
   return { baseUrl };
+}
+
+function isApiError(value: unknown): value is ApiError {
+  return typeof value === 'object'
+    && value !== null
+    && 'code' in value
+    && typeof value.code === 'string'
+    && 'message' in value
+    && typeof value.message === 'string';
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'The API request failed.';
+}
+
+export function createApiClient(options: ApiClientOptions): ApiClient {
+  const baseUrl = options.baseUrl.replace(/\/+$/, '');
+  const fetcher = options.fetcher ?? globalThis.fetch;
+
+  async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    const headers = new Headers(init.headers);
+    headers.set('Accept', 'application/json');
+
+    if (init.body !== undefined && !headers.has('Content-Type')) {
+      headers.set('Content-Type', 'application/json');
+    }
+
+    const token = await options.getAccessToken?.();
+    if (token) headers.set('Authorization', 'Bearer ' + token);
+
+    let response: Response;
+    try {
+      response = await fetcher(baseUrl + path, { ...init, headers });
+    } catch (error) {
+      throw new ApiClientError(errorMessage(error), 0, undefined, true);
+    }
+
+    const payload: unknown = await response.json().catch(() => undefined);
+    if (!response.ok) {
+      const apiError = isApiError(payload) ? payload : undefined;
+      const retryable = response.status === 408
+        || response.status === 425
+        || response.status === 429
+        || response.status >= 500;
+      throw new ApiClientError(
+        apiError?.message ?? `The API returned HTTP ${response.status}.`,
+        response.status,
+        apiError?.code,
+        retryable
+      );
+    }
+
+    return payload as T;
+  }
+
+  return {
+    getHealth: () => request<ApiHealthResponse>('/health'),
+    createVisit: (input) => request<VisitRecord>('/v1/visits', {
+      method: 'POST',
+      body: JSON.stringify(input)
+    }),
+    getVisit: (visitId) => request<VisitRecord>('/v1/visits/' + encodeURIComponent(visitId)),
+    createVisitRecording: (visitId, input) => request<RecordingMetadata>(
+      '/v1/visits/' + encodeURIComponent(visitId) + '/recordings',
+      { method: 'POST', body: JSON.stringify(input) }
+    ),
+    getRecording: (recordingId) => request<RecordingMetadata>(
+      '/v1/recordings/' + encodeURIComponent(recordingId)
+    ),
+    listRecordings: (query = {}) => {
+      const search = new URLSearchParams();
+      for (const [key, value] of Object.entries(query)) {
+        if (value !== undefined) search.set(key, String(value));
+      }
+      const queryString = search.toString();
+      const suffix = queryString ? '?' + queryString : '';
+      return request<RecordingPage>('/v1/recordings' + suffix);
+    }
+  };
 }

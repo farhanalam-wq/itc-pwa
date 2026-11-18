@@ -1,6 +1,6 @@
 import { app } from './app';
 
-const port = Number(Bun.env.PORT ?? 3001);
+const port = Number(Bun.env.PORT ?? 3002);
 
 app.listen(port);
 
