@@ -63,7 +63,7 @@ bun run dev:manager
 
 The API runs on port 3004, the field PWA on 5173, and the manager on 5180. The Vite apps proxy `/api` to the API. `bun run dev` starts all workspace apps through Turborepo.
 
-Create the first administrator using the one-time setup token and steps in [admin account setup](admin-account-setup.md). After account creation, remove `ADMIN_SETUP_TOKEN` from the API environment and restart it.
+Create the first administrator using the manager setup form and steps in [admin account setup](admin-account-setup.md). The form closes automatically after the account is created.
 
 ## What to verify
 

@@ -261,9 +261,8 @@ const createManualTranscriptBody = t.Object({
 
 const transcriptParams = t.Object({ transcriptId: t.String({ minLength: 1, maxLength: 128 }) });
 const adminIdentitySchema = t.Object({ id: t.String(), email: t.String(), displayName: t.String() });
-const adminAuthStatusSchema = t.Object({ adminExists: t.Boolean(), setupEnabled: t.Boolean() });
+const adminAuthStatusSchema = t.Object({ adminExists: t.Boolean() });
 const adminSetupBody = t.Object({
-  setupToken: t.String({ minLength: 1, maxLength: 512 }),
   email: t.String({ format: 'email', maxLength: 254 }),
   password: t.String({ minLength: 12, maxLength: 128 }),
   displayName: t.String({ minLength: 1, maxLength: 120 })
@@ -352,7 +351,7 @@ export function createApp(
     }))
     .get('/v1/auth/status', {
       response: { 200: adminAuthStatusSchema }
-    }, async () => adminAuth ? adminAuth.getStatus() : { adminExists: false, setupEnabled: false })
+    }, async () => adminAuth ? adminAuth.getStatus() : { adminExists: false })
     .post('/v1/auth/bootstrap', {
       body: adminSetupBody,
       cookie: sessionCookieSchema,
@@ -368,13 +367,11 @@ export function createApp(
       }
       if (!adminAuth) return status(503, unavailableAuth);
       const result = await adminAuth.bootstrap(body);
-      if (!result.ok) {
-        if (result.reason === 'setup_disabled') return status(503, { code: 'admin_setup_disabled', message: 'Set ADMIN_SETUP_TOKEN on the API before creating the first administrator.' });
-        if (result.reason === 'admin_exists') return status(409, { code: 'admin_already_created', message: 'The administrator account has already been created.' });
-        return status(403, { code: 'admin_setup_token_invalid', message: 'The administrator setup token is invalid.' });
+      if (result.ok) {
+        cookie.itc_admin_session.value = result.value.token;
+        return status(201, result.value.admin);
       }
-      cookie.itc_admin_session.value = result.value.token;
-      return status(201, result.value.admin);
+      return status(409, { code: 'admin_already_created', message: 'The administrator account has already been created.' });
     })
     .post('/v1/auth/login', {
       body: adminLoginBody,

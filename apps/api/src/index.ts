@@ -1,6 +1,6 @@
 import { MongoClient } from 'mongodb';
 import { createApp } from './app';
-import { MongoAdminAuthService, readAdminSetupToken } from './auth/admin-auth';
+import { MongoAdminAuthService } from './auth/admin-auth';
 import { createMongoRecordingRepository } from './repositories/mongo-recording-repository';
 import { createMongoTranscriptionRepository } from './repositories/mongo-transcription-repository';
 import { OpenAITranscriptionWorker } from './services/openai-transcription-worker';
@@ -21,7 +21,7 @@ async function start(): Promise<void> {
   const database = mongoClient.db(mongo.database);
   const repository = await createMongoRecordingRepository(database);
   const transcriptionJobs = await createMongoTranscriptionRepository(database);
-  const adminAuth = new MongoAdminAuthService(database, readAdminSetupToken(), {
+  const adminAuth = new MongoAdminAuthService(database, {
     cookieSecure: Bun.env.NODE_ENV === 'production'
   });
   await adminAuth.initialize();

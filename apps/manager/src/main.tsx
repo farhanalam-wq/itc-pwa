@@ -151,7 +151,6 @@ type AuthPanel = 'loading' | 'setup' | 'login' | 'service-error';
 function ManagerApp() {
   const [admin, setAdmin] = useState<AdminIdentity | null>(null);
   const [authPanel, setAuthPanel] = useState<AuthPanel>('loading');
-  const [setupEnabled, setSetupEnabled] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
 
@@ -160,7 +159,6 @@ function ManagerApp() {
     setAuthPanel('loading');
     try {
       const status = await captureApi.getAdminAuthStatus();
-      setSetupEnabled(status.setupEnabled);
       if (!status.adminExists) {
         setAuthPanel('setup');
         return;
@@ -202,7 +200,7 @@ function ManagerApp() {
     }
   }, [finishAuth]);
 
-  const handleBootstrap = useCallback(async (input: { setupToken: string; email: string; password: string; displayName: string }) => {
+  const handleBootstrap = useCallback(async (input: { email: string; password: string; displayName: string }) => {
     setAuthBusy(true);
     setAuthError(null);
     try {
@@ -230,13 +228,13 @@ function ManagerApp() {
 
   if (authPanel === 'loading') return <AuthLoading/>;
   if (authPanel === 'service-error') {
-    return <AccountAccessPage mode="unavailable" setupEnabled={setupEnabled} busy={authBusy} error={authError} onRetry={() => { void loadAuthState(); }} onSwitchToLogin={() => setAuthPanel('login')}/>;
+    return <AccountAccessPage mode="unavailable" busy={authBusy} error={authError} onRetry={() => { void loadAuthState(); }}/>;
   }
   if (admin) return <ManagerDashboard admin={admin} onLogout={() => { void handleLogout(); }} logoutBusy={authBusy} logoutError={authError}/>;
   if (authPanel === 'setup') {
-    return <AccountAccessPage mode="setup" setupEnabled={setupEnabled} busy={authBusy} error={authError} onSubmitSetup={(input) => { void handleBootstrap(input); }} onSwitchToLogin={() => setAuthPanel('login')} onRetry={() => { void loadAuthState(); }}/>;
+    return <AccountAccessPage mode="setup" busy={authBusy} error={authError} onSubmitSetup={(input) => { void handleBootstrap(input); }}/>;
   }
-  return <AccountAccessPage mode="login" setupEnabled={setupEnabled} busy={authBusy} error={authError} onSubmitLogin={(input) => { void handleLogin(input); }} onRetry={() => { void loadAuthState(); }}/>;
+  return <AccountAccessPage mode="login" busy={authBusy} error={authError} onSubmitLogin={(input) => { void handleLogin(input); }} onRetry={() => { void loadAuthState(); }}/>;
 }
 
 function AuthLoading() {
@@ -250,33 +248,28 @@ function AuthLoading() {
 
 function AccountAccessPage({
   mode,
-  setupEnabled,
   busy,
   error,
   onSubmitSetup,
   onSubmitLogin,
-  onSwitchToLogin,
   onRetry
 }: {
   mode: 'setup' | 'login' | 'unavailable';
-  setupEnabled: boolean;
   busy: boolean;
   error: string | null;
-  onSubmitSetup?: (input: { setupToken: string; email: string; password: string; displayName: string }) => void;
+  onSubmitSetup?: (input: { email: string; password: string; displayName: string }) => void;
   onSubmitLogin?: (input: { email: string; password: string }) => void;
-  onSwitchToLogin?: () => void;
   onRetry?: () => void;
 }) {
   const [displayName, setDisplayName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [setupToken, setSetupToken] = useState('');
   const pageTitle = mode === 'setup' ? 'Create the administrator account'
     : mode === 'login' ? 'Sign in to Field Source' : 'Administrator access is unavailable';
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (mode === 'setup') onSubmitSetup?.({ setupToken, email, password, displayName });
+    if (mode === 'setup') onSubmitSetup?.({ email, password, displayName });
     if (mode === 'login') onSubmitLogin?.({ email, password });
   }
 
@@ -292,12 +285,10 @@ function AccountAccessPage({
             : 'The API could not confirm account status. Check the service connection and try again.'}</p>
       </div>
 
-      {mode === 'unavailable' || (mode === 'setup' && !setupEnabled) ? <div className="auth-unavailable">
+      {mode === 'unavailable' ? <div className="auth-unavailable">
         {error && <p className="auth-error" role="alert">{error}</p>}
-        <p>{mode === 'setup' ? 'Initial account setup is not enabled yet.' : 'Retry after confirming the API is running.'}</p>
+        <p>Retry after confirming the API is running.</p>
         <button className="auth-submit" type="button" onClick={onRetry} disabled={busy}>{busy ? 'Checking…' : 'Retry connection'}</button>
-        {!setupEnabled && <small>Ask the API operator to configure <code>ADMIN_SETUP_TOKEN</code> before creating the first account.</small>}
-        {setupEnabled && <button className="auth-text-button" type="button" onClick={onSwitchToLogin}>Open sign in</button>}
       </div> : <form className="auth-form" onSubmit={submit}>
         {mode === 'setup' && <>
           <label htmlFor="admin-display-name">Name</label>
@@ -307,15 +298,10 @@ function AccountAccessPage({
         <input id="admin-email" name="email" type="email" autoComplete="username" value={email} onChange={(event) => setEmail(event.target.value)} required maxLength={254}/>
         <label htmlFor="admin-password">Password</label>
         <input id="admin-password" name="password" type="password" autoComplete={mode === 'setup' ? 'new-password' : 'current-password'} value={password} onChange={(event) => setPassword(event.target.value)} required minLength={12} maxLength={128}/>
-        {mode === 'setup' && <>
-          <label htmlFor="admin-setup-token">One-time setup token</label>
-          <input id="admin-setup-token" name="setupToken" type="password" autoComplete="off" value={setupToken} onChange={(event) => setSetupToken(event.target.value)} required maxLength={256}/>
-          <small className="auth-help">Ask the API operator for the setup token configured in <code>ADMIN_SETUP_TOKEN</code>. It is sent only to the API and is not saved in this app.</small>
-        </>}
         {error && <p className="auth-error" role="alert">{error}</p>}
         <button className="auth-submit" type="submit" disabled={busy}>{busy ? 'Please wait…' : mode === 'setup' ? 'Create administrator account' : 'Sign in'}</button>
-        {mode === 'setup' && <p className="auth-privacy">This setup closes after the first administrator account is created.</p>}
-        {mode === 'login' && !setupEnabled && onRetry && <button className="auth-text-button" type="button" onClick={onRetry}>Refresh account status</button>}
+        {mode === 'setup' && <p className="auth-privacy">This form is available until the first administrator account is created.</p>}
+        {mode === 'login' && onRetry && <button className="auth-text-button" type="button" onClick={onRetry}>Refresh account status</button>}
       </form>}
     </section>
     <aside className="auth-aside" aria-label="Field Source Manager information">

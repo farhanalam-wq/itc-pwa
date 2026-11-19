@@ -27,7 +27,6 @@ export interface SignedRecordingUrl {
 
 export interface AdminAuthStatus {
   adminExists: boolean;
-  setupEnabled: boolean;
 }
 
 export interface AdminIdentity {
@@ -37,7 +36,6 @@ export interface AdminIdentity {
 }
 
 export interface AdminBootstrapRequest {
-  setupToken: string;
   email: string;
   password: string;
   displayName: string;

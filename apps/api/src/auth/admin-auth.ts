@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import type { Collection, Db, Document } from 'mongodb';
 
 const ADMIN_ID = 'primary';
@@ -32,7 +32,6 @@ export interface AdminCredentials {
 }
 
 export interface AdminBootstrapInput extends AdminCredentials {
-  setupToken: string;
   displayName: string;
 }
 
@@ -41,10 +40,10 @@ export interface AdminSessionResult {
   token: string;
 }
 
-export type AdminAuthFailure = 'setup_disabled' | 'admin_exists' | 'setup_token_invalid' | 'invalid_credentials';
+export type AdminAuthFailure = 'admin_exists';
 
 export interface AdminAuthService {
-  getStatus(): Promise<{ adminExists: boolean; setupEnabled: boolean }>;
+  getStatus(): Promise<{ adminExists: boolean }>;
   bootstrap(input: AdminBootstrapInput): Promise<{ ok: true; value: AdminSessionResult } | { ok: false; reason: AdminAuthFailure }>;
   login(input: AdminCredentials): Promise<AdminSessionResult | undefined>;
   getSession(token: string | undefined): Promise<AdminIdentity | undefined>;
@@ -60,13 +59,6 @@ function tokenHash(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
 
-function matchesSecret(candidate: string, expected: string): boolean {
-  const candidateBytes = Buffer.from(candidate);
-  const expectedBytes = Buffer.from(expected);
-  return candidateBytes.byteLength === expectedBytes.byteLength
-    && timingSafeEqual(candidateBytes, expectedBytes);
-}
-
 function identity(admin: AdminDocument): AdminIdentity {
   return { id: ADMIN_ID, email: admin.email, displayName: admin.displayName };
 }
@@ -76,11 +68,7 @@ export class MongoAdminAuthService implements AdminAuthService {
   private readonly sessions: Collection<SessionDocument>;
   readonly cookieSecure: boolean;
 
-  constructor(
-    database: Db,
-    private readonly setupToken: string | undefined,
-    options: { cookieSecure: boolean }
-  ) {
+  constructor(database: Db, options: { cookieSecure: boolean }) {
     this.admins = database.collection<AdminDocument>('admins');
     this.sessions = database.collection<SessionDocument>('admin_sessions');
     this.cookieSecure = options.cookieSecure;
@@ -95,14 +83,12 @@ export class MongoAdminAuthService implements AdminAuthService {
     ]);
   }
 
-  async getStatus(): Promise<{ adminExists: boolean; setupEnabled: boolean }> {
+  async getStatus(): Promise<{ adminExists: boolean }> {
     const adminExists = Boolean(await this.admins.findOne({ _id: ADMIN_ID }, { projection: { _id: 1 } }));
-    return { adminExists, setupEnabled: !adminExists && Boolean(this.setupToken) };
+    return { adminExists };
   }
 
   async bootstrap(input: AdminBootstrapInput): Promise<{ ok: true; value: AdminSessionResult } | { ok: false; reason: AdminAuthFailure }> {
-    if (!this.setupToken) return { ok: false, reason: 'setup_disabled' };
-    if (!matchesSecret(input.setupToken, this.setupToken)) return { ok: false, reason: 'setup_token_invalid' };
     if (await this.admins.findOne({ _id: ADMIN_ID }, { projection: { _id: 1 } })) {
       return { ok: false, reason: 'admin_exists' };
     }
@@ -168,10 +154,6 @@ export class MongoAdminAuthService implements AdminAuthService {
 
 function isDuplicateKey(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 11000;
-}
-
-export function readAdminSetupToken(env: Record<string, string | undefined> = Bun.env): string | undefined {
-  return env.ADMIN_SETUP_TOKEN?.trim() || undefined;
 }
 
 export function readManagerOrigin(env: Record<string, string | undefined> = Bun.env): string | undefined {
