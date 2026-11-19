@@ -24,6 +24,34 @@ export interface SignedRecordingUrl {
   expiresAt: string;
 }
 
+export interface AdminAuthStatus {
+  adminExists: boolean;
+  setupEnabled: boolean;
+}
+
+export interface AdminIdentity {
+  id: string;
+  email: string;
+  displayName: string;
+}
+
+export interface AdminBootstrapRequest {
+  setupToken: string;
+  email: string;
+  password: string;
+  displayName: string;
+}
+
+export interface AdminLoginRequest {
+  email: string;
+  password: string;
+}
+
+export interface RecordingSyncStatus {
+  id: string;
+  syncState: SyncState;
+}
+
 export type ApiHealthResponse = HealthResponse & { runtime: ApiRuntimeHealth };
 
 export interface VisitRecord {
@@ -94,10 +122,16 @@ export class ApiClientError extends Error {
 
 export interface ApiClient {
   getHealth(): Promise<ApiHealthResponse>;
+  getAdminAuthStatus(): Promise<AdminAuthStatus>;
+  bootstrapAdmin(input: AdminBootstrapRequest): Promise<AdminIdentity>;
+  loginAdmin(input: AdminLoginRequest): Promise<AdminIdentity>;
+  getAdminSession(): Promise<AdminIdentity>;
+  logoutAdmin(): Promise<{ ok: true }>;
   createVisit(input: CreateVisitRequest): Promise<VisitRecord>;
   getVisit(visitId: string): Promise<VisitRecord>;
   createVisitRecording(visitId: string, input: CreateRecordingRequest): Promise<RecordingMetadata>;
   getRecording(recordingId: string): Promise<RecordingMetadata>;
+  getRecordingSyncStatus(recordingId: string): Promise<RecordingSyncStatus>;
   listRecordings(query?: ListRecordingsQuery): Promise<RecordingPage>;
   getRecordingDownloadUrl(recordingId: string): Promise<SignedRecordingUrl>;
   uploadRecordingAudio(recordingId: string, file: Blob, onChunk?: (sent: number, total: number) => void): Promise<RecordingMetadata>;
@@ -150,7 +184,12 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
     if (init.signal?.aborted) forwardAbort();
     else init.signal?.addEventListener('abort', forwardAbort, { once: true });
     try {
-      response = await fetcher(baseUrl + path, { ...init, headers, signal: controller.signal });
+      response = await fetcher(baseUrl + path, {
+        ...init,
+        credentials: init.credentials ?? 'same-origin',
+        headers,
+        signal: controller.signal
+      });
     } catch (error) {
       if (didTimeout) {
         throw new ApiClientError(
@@ -189,6 +228,17 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
 
   return {
     getHealth: () => request<ApiHealthResponse>('/health'),
+    getAdminAuthStatus: () => request<AdminAuthStatus>('/v1/auth/status'),
+    bootstrapAdmin: (input) => request<AdminIdentity>('/v1/auth/bootstrap', {
+      method: 'POST',
+      body: JSON.stringify(input)
+    }),
+    loginAdmin: (input) => request<AdminIdentity>('/v1/auth/login', {
+      method: 'POST',
+      body: JSON.stringify(input)
+    }),
+    getAdminSession: () => request<AdminIdentity>('/v1/auth/session'),
+    logoutAdmin: () => request<{ ok: true }>('/v1/auth/logout', { method: 'POST' }),
     createVisit: (input) => request<VisitRecord>('/v1/visits', {
       method: 'POST',
       body: JSON.stringify(input)
@@ -200,6 +250,9 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
     ),
     getRecording: (recordingId) => request<RecordingMetadata>(
       '/v1/recordings/' + encodeURIComponent(recordingId)
+    ),
+    getRecordingSyncStatus: (recordingId) => request<RecordingSyncStatus>(
+      '/v1/recordings/' + encodeURIComponent(recordingId) + '/sync'
     ),
     listRecordings: (query = {}) => {
       const search = new URLSearchParams();

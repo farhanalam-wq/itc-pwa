@@ -1,6 +1,13 @@
 import { Elysia, t } from 'elysia';
 import type { AnalysisState, ManualTranscriptAnalysis, RecordingMetadata, SyncState } from '@itc/domain';
 import {
+  ADMIN_SESSION_MAX_AGE_SECONDS,
+  isAllowedManagerOrigin,
+  readAdminSessionToken,
+  readManagerOrigin,
+  type AdminAuthService
+} from './auth/admin-auth';
+import {
   DemoRecordingRepository,
   type RecordingRepository
 } from './repositories/demo-repository';
@@ -130,7 +137,7 @@ const recordingQuery = t.Object({
 
 const uploadUnavailableSchema = t.Object({ code: t.String(), message: t.String() });
 const signedUrlSchema = t.Object({
-  url: t.String({ format: 'uri' }),
+  url: t.String(),
   objectKey: t.String(),
   expiresAt: t.String({ format: 'date-time' })
 });
@@ -231,6 +238,18 @@ const createManualTranscriptBody = t.Object({
 });
 
 const transcriptParams = t.Object({ transcriptId: t.String({ minLength: 1, maxLength: 128 }) });
+const adminIdentitySchema = t.Object({ id: t.String(), email: t.String(), displayName: t.String() });
+const adminAuthStatusSchema = t.Object({ adminExists: t.Boolean(), setupEnabled: t.Boolean() });
+const adminSetupBody = t.Object({
+  setupToken: t.String({ minLength: 1, maxLength: 512 }),
+  email: t.String({ format: 'email', maxLength: 254 }),
+  password: t.String({ minLength: 12, maxLength: 128 }),
+  displayName: t.String({ minLength: 1, maxLength: 120 })
+});
+const adminLoginBody = t.Object({
+  email: t.String({ format: 'email', maxLength: 254 }),
+  password: t.String({ minLength: 1, maxLength: 128 })
+});
 
 export interface ApiRuntimeInfo {
   persistence: 'in-memory-demo' | 'mongodb';
@@ -248,8 +267,26 @@ export function createApp(
   uploads: S3RecordingUploads = new S3RecordingUploads(),
   transcripts: ManualTranscriptRepository = new InMemoryManualTranscriptRepository(),
   localStorage: LocalRecordingStorage = new LocalRecordingStorage(Bun.env.LOCAL_UPLOAD_STAGING_DIR ?? './var/upload-staging'),
-  recordingStorage: RecordingObjectStorage = createRecordingStorage(readStorageConfig())
+  recordingStorage: RecordingObjectStorage = createRecordingStorage(readStorageConfig()),
+  adminAuth?: AdminAuthService
 ) {
+  const managerOrigin = readManagerOrigin();
+  const sessionCookieSchema = t.Object({
+    itc_admin_session: t.Cookie(t.Optional(t.String()), {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: adminAuth?.cookieSecure ?? Bun.env.NODE_ENV === 'production',
+      path: '/',
+      maxAge: ADMIN_SESSION_MAX_AGE_SECONDS
+    })
+  });
+  const hasAdminSession = async (request: Request): Promise<boolean> => {
+    if (!adminAuth) return false;
+    return Boolean(await adminAuth.getSession(readAdminSessionToken(request.headers.get('cookie'))));
+  };
+  const unauthorizedAdmin = { code: 'admin_auth_required', message: 'Sign in with the administrator account to continue.' };
+  const unavailableAuth = { code: 'admin_auth_unavailable', message: 'Administrator authentication is not configured on this API.' };
+
   return new Elysia()
     .get('/health', () => ({
       status: 'ok' as const,
@@ -261,14 +298,86 @@ export function createApp(
         storageDriver: recordingStorage.driver
       } satisfies ApiRuntimeInfo
     }))
+    .get('/v1/auth/status', {
+      response: { 200: adminAuthStatusSchema }
+    }, async () => adminAuth ? adminAuth.getStatus() : { adminExists: false, setupEnabled: false })
+    .post('/v1/auth/bootstrap', {
+      body: adminSetupBody,
+      cookie: sessionCookieSchema,
+      response: {
+        201: adminIdentitySchema,
+        403: errorSchema,
+        409: errorSchema,
+        503: errorSchema
+      }
+    }, async ({ body, cookie, request, status }) => {
+      if (!isAllowedManagerOrigin(request, managerOrigin)) {
+        return status(403, { code: 'admin_origin_rejected', message: 'The administrator request origin is not allowed.' });
+      }
+      if (!adminAuth) return status(503, unavailableAuth);
+      const result = await adminAuth.bootstrap(body);
+      if (!result.ok) {
+        if (result.reason === 'setup_disabled') return status(503, { code: 'admin_setup_disabled', message: 'Set ADMIN_SETUP_TOKEN on the API before creating the first administrator.' });
+        if (result.reason === 'admin_exists') return status(409, { code: 'admin_already_created', message: 'The administrator account has already been created.' });
+        return status(403, { code: 'admin_setup_token_invalid', message: 'The administrator setup token is invalid.' });
+      }
+      cookie.itc_admin_session.value = result.value.token;
+      return status(201, result.value.admin);
+    })
+    .post('/v1/auth/login', {
+      body: adminLoginBody,
+      cookie: sessionCookieSchema,
+      response: {
+        200: adminIdentitySchema,
+        401: errorSchema,
+        403: errorSchema,
+        503: errorSchema
+      }
+    }, async ({ body, cookie, request, status }) => {
+      if (!isAllowedManagerOrigin(request, managerOrigin)) {
+        return status(403, { code: 'admin_origin_rejected', message: 'The administrator request origin is not allowed.' });
+      }
+      if (!adminAuth) return status(503, unavailableAuth);
+      const result = await adminAuth.login(body);
+      if (!result) return status(401, { code: 'admin_credentials_invalid', message: 'The email or password is incorrect.' });
+      cookie.itc_admin_session.value = result.token;
+      return result.admin;
+    })
+    .get('/v1/auth/session', {
+      cookie: sessionCookieSchema,
+      response: { 200: adminIdentitySchema, 401: errorSchema, 503: errorSchema }
+    }, async ({ cookie, status }) => {
+      if (!adminAuth) return status(503, unavailableAuth);
+      const admin = await adminAuth.getSession(cookie.itc_admin_session.value);
+      return admin ?? status(401, unauthorizedAdmin);
+    })
+    .post('/v1/auth/logout', {
+      cookie: sessionCookieSchema,
+      response: { 200: t.Object({ ok: t.Boolean() }), 403: errorSchema, 503: errorSchema }
+    }, async ({ cookie, request, status }) => {
+      if (!isAllowedManagerOrigin(request, managerOrigin)) {
+        return status(403, { code: 'admin_origin_rejected', message: 'The administrator request origin is not allowed.' });
+      }
+      if (!adminAuth) return status(503, unavailableAuth);
+      await adminAuth.logout(cookie.itc_admin_session.value);
+      cookie.itc_admin_session.remove();
+      return { ok: true };
+    })
     .post('/v1/transcripts', {
       body: createManualTranscriptBody,
       response: {
         201: manualTranscriptSchema,
         400: errorSchema,
+        401: errorSchema,
+        403: errorSchema,
         503: uploadUnavailableSchema
       }
-    }, async ({ body, status }) => {
+    }, async ({ body, request, status }) => {
+      if (!adminAuth) return status(503, unavailableAuth);
+      if (!await hasAdminSession(request)) return status(401, unauthorizedAdmin);
+      if (!isAllowedManagerOrigin(request, managerOrigin)) {
+        return status(403, { code: 'admin_origin_rejected', message: 'The administrator request origin is not allowed.' });
+      }
       if (!body.consentConfirmed) {
         return status(400, {
           code: 'transcript_consent_required',
@@ -339,15 +448,23 @@ export function createApp(
       return status(201, result);
     })
     .get('/v1/transcripts', {
-      response: { 200: manualTranscriptPageSchema }
-    }, () => transcripts.list())
+      response: { 200: manualTranscriptPageSchema, 401: errorSchema, 503: errorSchema }
+    }, async ({ request, status }) => {
+      if (!adminAuth) return status(503, unavailableAuth);
+      if (!await hasAdminSession(request)) return status(401, unauthorizedAdmin);
+      return transcripts.list();
+    })
     .get('/v1/transcripts/:transcriptId', {
       params: transcriptParams,
       response: {
         200: manualTranscriptSchema,
+        401: errorSchema,
+        503: errorSchema,
         404: errorSchema
       }
-    }, ({ params, status }) => {
+    }, async ({ params, request, status }) => {
+      if (!adminAuth) return status(503, unavailableAuth);
+      if (!await hasAdminSession(request)) return status(401, unauthorizedAdmin);
       const transcript = transcripts.get(params.transcriptId);
       if (!transcript) return status(404, { code: 'transcript_not_found', message: 'The requested manual transcript was not found in this demo API instance.' });
       return transcript;
@@ -373,9 +490,13 @@ export function createApp(
       params: visitParams,
       response: {
         200: visitSchema,
+        401: errorSchema,
+        503: errorSchema,
         404: errorSchema
       }
-    }, async ({ params, status }) => {
+    }, async ({ params, request, status }) => {
+      if (!adminAuth) return status(503, unavailableAuth);
+      if (!await hasAdminSession(request)) return status(401, unauthorizedAdmin);
       const visit = await repository.getVisit(params.visitId);
       if (!visit) {
         return status(404, {
@@ -413,8 +534,10 @@ export function createApp(
     })
     .get('/v1/recordings', {
       query: recordingQuery,
-      response: recordingPageSchema
-    }, async ({ query }) => {
+      response: { 200: recordingPageSchema, 401: errorSchema, 503: errorSchema }
+    }, async ({ query, request, status }) => {
+      if (!adminAuth) return status(503, unavailableAuth);
+      if (!await hasAdminSession(request)) return status(401, unauthorizedAdmin);
       return repository.listRecordings({
         syncState: query.syncState as SyncState | undefined,
         analysisState: query.analysisState as AnalysisState | undefined,
@@ -524,11 +647,14 @@ export function createApp(
       params: recordingParams,
       response: {
         200: signedUrlSchema,
+        401: errorSchema,
         404: errorSchema,
         409: errorSchema,
         503: uploadUnavailableSchema
       }
     }, async ({ params, request, status }) => {
+      if (!adminAuth) return status(503, unavailableAuth);
+      if (!await hasAdminSession(request)) return status(401, unauthorizedAdmin);
       const recording = await repository.getRecording(params.recordingId);
       if (!recording) return status(404, { code: 'recording_not_found', message: 'The recording metadata was not found.' });
       if (recording.syncState !== 'uploaded' || !recording.objectKey || !recording.storageDriver) {
@@ -544,17 +670,18 @@ export function createApp(
           return status(503, { code: 'recording_link_failed', message: 'The API could not create a temporary S3 playback link.' });
         }
       }
-      const origin = new URL(request.url).origin;
       return {
-        url: new URL(`/v1/recordings/${encodeURIComponent(recording.id)}/audio`, origin).toString(),
+        url: `/api/v1/recordings/${encodeURIComponent(recording.id)}/audio`,
         objectKey: recording.objectKey,
         expiresAt: new Date(Date.now() + 5 * 60_000).toISOString()
       };
     })
     .get('/v1/recordings/:recordingId/audio', {
       params: recordingParams,
-      response: { 404: errorSchema, 409: errorSchema }
-    }, async ({ params, status }) => {
+      response: { 401: errorSchema, 404: errorSchema, 409: errorSchema, 503: errorSchema }
+    }, async ({ params, request, status }) => {
+      if (!adminAuth) return status(503, unavailableAuth);
+      if (!await hasAdminSession(request)) return status(401, unauthorizedAdmin);
       const recording = await repository.getRecording(params.recordingId);
       if (!recording) return status(404, { code: 'recording_not_found', message: 'The recording metadata was not found.' });
       if (recording.syncState !== 'uploaded' || !recording.objectKey || recording.storageDriver !== 'local') {
@@ -579,9 +706,13 @@ export function createApp(
       params: recordingParams,
       response: {
         200: analysisStatusSchema,
+        401: errorSchema,
+        503: errorSchema,
         404: errorSchema
       }
-    }, async ({ params, status }) => {
+    }, async ({ params, request, status }) => {
+      if (!adminAuth) return status(503, unavailableAuth);
+      if (!await hasAdminSession(request)) return status(401, unauthorizedAdmin);
       const analysis = await repository.getAnalysisStatus(params.recordingId);
       if (!analysis) {
         return status(404, {
@@ -595,9 +726,13 @@ export function createApp(
       params: recordingParams,
       response: {
         200: recordingSchema,
+        401: errorSchema,
+        503: errorSchema,
         404: errorSchema
       }
-    }, async ({ params, status }) => {
+    }, async ({ params, request, status }) => {
+      if (!adminAuth) return status(503, unavailableAuth);
+      if (!await hasAdminSession(request)) return status(401, unauthorizedAdmin);
       const recording: RecordingMetadata | undefined = await repository.getRecording(params.recordingId);
       if (!recording) {
         return status(404, {
@@ -607,13 +742,25 @@ export function createApp(
       }
       return recording;
     })
+    .get('/v1/recordings/:recordingId/sync', {
+      params: recordingParams,
+      response: { 200: t.Object({ id: t.String(), syncState: syncStateSchema }), 404: errorSchema }
+    }, async ({ params, status }) => {
+      const recording = await repository.getRecording(params.recordingId);
+      if (!recording) return status(404, { code: 'recording_not_found', message: 'The requested recording does not exist.' });
+      return { id: recording.id, syncState: recording.syncState };
+    })
     .get('/v1/recordings/:recordingId/visit', {
       params: recordingParams,
       response: {
         200: visitSchema,
+        401: errorSchema,
+        503: errorSchema,
         404: errorSchema
       }
-    }, async ({ params, status }) => {
+    }, async ({ params, request, status }) => {
+      if (!adminAuth) return status(503, unavailableAuth);
+      if (!await hasAdminSession(request)) return status(401, unauthorizedAdmin);
       const visitId = await repository.getRecordingVisitId(params.recordingId);
       if (!visitId) {
         return status(404, {

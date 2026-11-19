@@ -49,9 +49,9 @@ export async function uploadPendingAudio(client: ApiClient, onProgress?: (progre
   for (const recording of pending) {
     let objectKey: string | undefined;
     try {
-      const remote = await client.getRecording(recording.id);
+      const remote = await client.getRecordingSyncStatus(recording.id);
       if (remote.syncState === 'uploaded') {
-        await recordingStore.setSyncState(recording.id, 'uploaded', { objectKey: remote.objectKey });
+        await recordingStore.setSyncState(recording.id, 'uploaded');
         uploaded += 1;
         continue;
       }

@@ -483,3 +483,19 @@ Before distribution, confirm ITC’s ApexCharts license terms for the intended c
 - ApexCharts current licensing terms: https://apexcharts.com/license/
 - Impeccable design workflow: https://impeccable.style/
 - Hanken Grotesk project and OFL details: https://github.com/marcologous/hanken-grotesk
+
+## 16. Implementation execution log — 2026-11-19
+
+This log tracks the revised vertical slice above. Each phase is committed before work on its dependent phase begins.
+
+| Phase | Status | Commit | Delivered |
+| --- | --- | --- | --- |
+| 0 — Repository recovery | Complete | `f4eaa58 chore: ignore local recording artifacts` | Removed captured WebM files from Git tracking while preserving local files; ignored API upload/runtime directories. |
+| 1 — MongoDB and storage adapters | Complete | `ddd1651 feat: persist recordings with configurable storage` | Added Mongo metadata repository, validated local/S3 storage selection, private local playback and single finalized object handling. |
+| 2 — OPFS sync reliability | Complete | `d8bef04 fix: resume recording sync to configured storage` | Added manifest-backed resumable chunk transport, digest/size checks and server durability confirmation before PWA completion. |
+| 3 — Single administrator | In review | — | Mongo-backed one-time bootstrap, password login, opaque expiring sessions, manager-route protection, and manager setup/sign-in UI. |
+| 4 — OpenAI transcription | Not started | — | Transcribe only completed stored audio, persist lifecycle/transcript, and report provider failures honestly. |
+| 5 — Manager transcript display | Not started | — | Show real recording transcript text and lifecycle distinctly from synthetic report fixtures. |
+| 6 — Workflow handoff | Not started | — | Update setup/runbook and verify the end-to-end workflow supported by configured services. |
+
+OpenAI is the selected transcription provider for this increment. The API key is server-only (`OPENAI_API_KEY`). The manager remains a single-admin workspace; there is no tenant model or automated insight extraction in this scope.

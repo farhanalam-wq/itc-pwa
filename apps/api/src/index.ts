@@ -1,5 +1,6 @@
 import { MongoClient } from 'mongodb';
 import { createApp } from './app';
+import { MongoAdminAuthService, readAdminSetupToken } from './auth/admin-auth';
 import { createMongoRecordingRepository } from './repositories/mongo-recording-repository';
 import { readMongoConfig, readStorageConfig } from './services/storage/config';
 import { createRecordingStorage } from './services/storage/recording-storage';
@@ -14,9 +15,14 @@ async function start(): Promise<void> {
 
   const mongoClient = new MongoClient(mongo.uri, { serverSelectionTimeoutMS: 5_000 });
   await mongoClient.connect();
-  const repository = await createMongoRecordingRepository(mongoClient.db(mongo.database));
+  const database = mongoClient.db(mongo.database);
+  const repository = await createMongoRecordingRepository(database);
+  const adminAuth = new MongoAdminAuthService(database, readAdminSetupToken(), {
+    cookieSecure: Bun.env.NODE_ENV === 'production'
+  });
+  await adminAuth.initialize();
   const storage = createRecordingStorage(readStorageConfig());
-  const app = createApp(repository, undefined, undefined, undefined, storage);
+  const app = createApp(repository, undefined, undefined, undefined, storage, adminAuth);
 
   app.onStop(() => mongoClient.close());
   app.listen(port);

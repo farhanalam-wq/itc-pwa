@@ -1,4 +1,4 @@
-import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { StrictMode, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { ApexOptions } from 'apexcharts';
 import { createApiClient, type ApiRuntimeHealth } from '@itc/api-client';
@@ -141,7 +141,188 @@ function Icon({ name }: { name: 'grid' | 'signal' | 'team' | 'list' | 'search' |
   return <svg viewBox="0 0 24 24" aria-hidden="true" {...common}><path d="m8 5 11 7-11 7z"/></svg>;
 }
 
+type AdminIdentity = { id: string; email: string; displayName: string };
+type AuthPanel = 'loading' | 'setup' | 'login' | 'service-error';
+
 function ManagerApp() {
+  const [admin, setAdmin] = useState<AdminIdentity | null>(null);
+  const [authPanel, setAuthPanel] = useState<AuthPanel>('loading');
+  const [setupEnabled, setSetupEnabled] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authBusy, setAuthBusy] = useState(false);
+
+  const loadAuthState = useCallback(async () => {
+    setAuthError(null);
+    setAuthPanel('loading');
+    try {
+      const status = await captureApi.getAdminAuthStatus();
+      setSetupEnabled(status.setupEnabled);
+      if (!status.adminExists) {
+        setAuthPanel('setup');
+        return;
+      }
+      try {
+        setAdmin(await captureApi.getAdminSession());
+        setAuthPanel('login');
+      } catch (error) {
+        if (error instanceof Error && 'status' in error && error.status === 401) {
+          setAdmin(null);
+          setAuthPanel('login');
+          return;
+        }
+        throw error;
+      }
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : 'The account service could not be reached.');
+      setAuthPanel('service-error');
+    }
+  }, []);
+
+  useEffect(() => { void loadAuthState(); }, [loadAuthState]);
+
+  const finishAuth = useCallback((identity: AdminIdentity) => {
+    setAdmin(identity);
+    setAuthPanel('login');
+    setAuthError(null);
+  }, []);
+
+  const handleLogin = useCallback(async (input: { email: string; password: string }) => {
+    setAuthBusy(true);
+    setAuthError(null);
+    try {
+      finishAuth(await captureApi.loginAdmin(input));
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : 'Sign in could not be completed.');
+    } finally {
+      setAuthBusy(false);
+    }
+  }, [finishAuth]);
+
+  const handleBootstrap = useCallback(async (input: { setupToken: string; email: string; password: string; displayName: string }) => {
+    setAuthBusy(true);
+    setAuthError(null);
+    try {
+      finishAuth(await captureApi.bootstrapAdmin(input));
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : 'Administrator setup could not be completed.');
+    } finally {
+      setAuthBusy(false);
+    }
+  }, [finishAuth]);
+
+  const handleLogout = useCallback(async () => {
+    setAuthBusy(true);
+    try {
+      await captureApi.logoutAdmin();
+      setAdmin(null);
+      setAuthPanel('login');
+      setAuthError(null);
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : 'Sign out could not be completed.');
+    } finally {
+      setAuthBusy(false);
+    }
+  }, []);
+
+  if (authPanel === 'loading') return <AuthLoading/>;
+  if (authPanel === 'service-error') {
+    return <AccountAccessPage mode="unavailable" setupEnabled={setupEnabled} busy={authBusy} error={authError} onRetry={() => { void loadAuthState(); }} onSwitchToLogin={() => setAuthPanel('login')}/>;
+  }
+  if (admin) return <ManagerDashboard admin={admin} onLogout={() => { void handleLogout(); }} logoutBusy={authBusy} logoutError={authError}/>;
+  if (authPanel === 'setup') {
+    return <AccountAccessPage mode="setup" setupEnabled={setupEnabled} busy={authBusy} error={authError} onSubmitSetup={(input) => { void handleBootstrap(input); }} onSwitchToLogin={() => setAuthPanel('login')} onRetry={() => { void loadAuthState(); }}/>;
+  }
+  return <AccountAccessPage mode="login" setupEnabled={setupEnabled} busy={authBusy} error={authError} onSubmitLogin={(input) => { void handleLogin(input); }} onRetry={() => { void loadAuthState(); }}/>;
+}
+
+function AuthLoading() {
+  return <main className="auth-shell" aria-busy="true" aria-live="polite">
+    <section className="auth-panel auth-loading">
+      <div className="auth-brand"><span className="brand-mark">FS</span><span><strong>Field Source</strong><small>MANAGER WORKSPACE</small></span></div>
+      <p>Checking administrator access…</p>
+    </section>
+  </main>;
+}
+
+function AccountAccessPage({
+  mode,
+  setupEnabled,
+  busy,
+  error,
+  onSubmitSetup,
+  onSubmitLogin,
+  onSwitchToLogin,
+  onRetry
+}: {
+  mode: 'setup' | 'login' | 'unavailable';
+  setupEnabled: boolean;
+  busy: boolean;
+  error: string | null;
+  onSubmitSetup?: (input: { setupToken: string; email: string; password: string; displayName: string }) => void;
+  onSubmitLogin?: (input: { email: string; password: string }) => void;
+  onSwitchToLogin?: () => void;
+  onRetry?: () => void;
+}) {
+  const [displayName, setDisplayName] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [setupToken, setSetupToken] = useState('');
+  const pageTitle = mode === 'setup' ? 'Create the administrator account'
+    : mode === 'login' ? 'Sign in to Field Source' : 'Administrator access is unavailable';
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (mode === 'setup') onSubmitSetup?.({ setupToken, email, password, displayName });
+    if (mode === 'login') onSubmitLogin?.({ email, password });
+  }
+
+  return <main className="auth-shell">
+    <section className="auth-panel" aria-labelledby="auth-title">
+      <div className="auth-brand"><span className="brand-mark">FS</span><span><strong>Field Source</strong><small>MANAGER WORKSPACE</small></span></div>
+      <div className="auth-copy">
+        <h1 id="auth-title">{pageTitle}</h1>
+        <p>{mode === 'setup'
+          ? 'Create the single administrator account that controls this reporting workspace.'
+          : mode === 'login'
+            ? 'Use your administrator credentials to review field recordings and transcripts.'
+            : 'The API could not confirm account status. Check the service connection and try again.'}</p>
+      </div>
+
+      {mode === 'unavailable' || (mode === 'setup' && !setupEnabled) ? <div className="auth-unavailable">
+        {error && <p className="auth-error" role="alert">{error}</p>}
+        <p>{mode === 'setup' ? 'Initial account setup is not enabled yet.' : 'Retry after confirming the API is running.'}</p>
+        <button className="auth-submit" type="button" onClick={onRetry} disabled={busy}>{busy ? 'Checking…' : 'Retry connection'}</button>
+        {!setupEnabled && <small>Ask the API operator to configure <code>ADMIN_SETUP_TOKEN</code> before creating the first account.</small>}
+        {setupEnabled && <button className="auth-text-button" type="button" onClick={onSwitchToLogin}>Open sign in</button>}
+      </div> : <form className="auth-form" onSubmit={submit}>
+        {mode === 'setup' && <>
+          <label htmlFor="admin-display-name">Name</label>
+          <input id="admin-display-name" name="displayName" autoComplete="name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} required maxLength={100}/>
+        </>}
+        <label htmlFor="admin-email">Email</label>
+        <input id="admin-email" name="email" type="email" autoComplete="username" value={email} onChange={(event) => setEmail(event.target.value)} required maxLength={254}/>
+        <label htmlFor="admin-password">Password</label>
+        <input id="admin-password" name="password" type="password" autoComplete={mode === 'setup' ? 'new-password' : 'current-password'} value={password} onChange={(event) => setPassword(event.target.value)} required minLength={12} maxLength={128}/>
+        {mode === 'setup' && <>
+          <label htmlFor="admin-setup-token">One-time setup token</label>
+          <input id="admin-setup-token" name="setupToken" type="password" autoComplete="off" value={setupToken} onChange={(event) => setSetupToken(event.target.value)} required maxLength={256}/>
+          <small className="auth-help">Ask the API operator for the setup token configured in <code>ADMIN_SETUP_TOKEN</code>. It is sent only to the API and is not saved in this app.</small>
+        </>}
+        {error && <p className="auth-error" role="alert">{error}</p>}
+        <button className="auth-submit" type="submit" disabled={busy}>{busy ? 'Please wait…' : mode === 'setup' ? 'Create administrator account' : 'Sign in'}</button>
+        {mode === 'setup' && <p className="auth-privacy">This setup closes after the first administrator account is created.</p>}
+        {mode === 'login' && !setupEnabled && onRetry && <button className="auth-text-button" type="button" onClick={onRetry}>Refresh account status</button>}
+      </form>}
+    </section>
+    <aside className="auth-aside" aria-label="Field Source Manager information">
+      <div className="auth-aside-mark" aria-hidden="true">FS</div>
+      <div><p>Conversation evidence, in context.</p><span>Review real recordings and transcripts alongside clearly labeled synthetic demo reports.</span></div>
+      <small>Private administrator workspace</small>
+    </aside>
+  </main>;
+}
+
+function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin: AdminIdentity; onLogout: () => void; logoutBusy: boolean; logoutError: string | null }) {
   const [view, setView] = useState<View>('overview');
   const [period, setPeriod] = useState<Period>('7');
   const [territory, setTerritory] = useState('all');
@@ -800,10 +981,11 @@ function ManagerApp() {
         <button title="Visit history" aria-label="Visit history" className={view === 'visits' ? 'active' : ''} onClick={() => setView('visits')}><Icon name="list"/>Visit history</button>
       </nav>
       <div className="rail-status"><span className="rail-status-icon"><i/></span><span><strong>Demo workspace</strong><small>Seeded + imported reports</small></span></div>
-      <div className="rail-user"><span className="user-avatar">AS</span><span><strong>Ananya Shah</strong><small>Field Source Manager</small></span><button aria-label="Manager profile menu" className="more-button">···</button></div>
+      <div className="rail-user"><span className="user-avatar">{admin.displayName.trim().split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase()).join('')}</span><span><strong>{admin.displayName}</strong><small>{admin.email}</small></span><button aria-label="Sign out" title="Sign out" className="logout-button" type="button" onClick={onLogout} disabled={logoutBusy}>{logoutBusy ? 'Working' : 'Sign out'}</button></div>
     </aside>
 
     <main className="workspace-main">
+      {logoutError && <p className="auth-inline-error" role="alert">Sign out failed: {logoutError}</p>}
       <header className="topbar"><div className="breadcrumbs"><span>Reports</span><i>/</i><strong>{view === 'team' ? 'Field team' : view === 'visits' ? 'Visit history' : view === 'overview' ? 'Overview' : 'Conversation insights'}</strong></div>
         <div className="topbar-tools">{renderFilters()}<span className="demo-pill"><i/>{manualTranscripts.length ? 'DEMO + TRANSCRIPTS' : 'SYNTHETIC DEMO'}</span></div>
       </header>
