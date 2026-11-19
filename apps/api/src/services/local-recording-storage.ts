@@ -29,6 +29,12 @@ export class LocalRecordingStorage {
     return readFile(this.recordingPath(id, startedAt, mimeType).path);
   }
 
+  async removeStaged(id: string, startedAt: string, mimeType: string): Promise<void> {
+    const { path } = this.recordingPath(id, startedAt, mimeType);
+    await rm(path, { force: true });
+    await rm(`${path}.chunks`, { recursive: true, force: true });
+  }
+
   async saveChunk(input: { id: string; startedAt: string; mimeType: string; index: number; total: number; bytes: Uint8Array }): Promise<{ objectKey: string; complete: boolean }> {
     const { path, relative } = this.recordingPath(input.id, input.startedAt, input.mimeType);
     const chunkDir = `${path}.chunks`;

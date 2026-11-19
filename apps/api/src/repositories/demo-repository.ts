@@ -52,16 +52,25 @@ export interface RecordingPage {
   nextOffset: number | null;
 }
 
+export interface StoredObjectMetadata {
+  driver: 'local' | 's3';
+  objectKey: string;
+  byteLength: number;
+  mimeType: string;
+  sha256: string;
+}
+
 export interface RecordingRepository {
-  createVisit(input: CreateVisitInput): CreateResult<VisitRecord>;
-  getVisit(id: string): VisitRecord | undefined;
-  createRecording(visitId: string, input: CreateRecordingInput): CreateRecordingResult<RecordingMetadata>;
-  getRecording(id: string): RecordingMetadata | undefined;
-  getRecordingVisitId(id: string): string | undefined;
-  getAnalysisStatus(id: string): Pick<RecordingMetadata, 'id' | 'syncState' | 'analysisState'> | undefined;
-  listRecordings(filters: RecordingFilters): RecordingPage;
-  transitionSyncState(id: string, next: SyncState, objectKey?: string): boolean;
-  transitionAnalysisState(id: string, next: AnalysisState): boolean;
+  createVisit(input: CreateVisitInput): Promise<CreateResult<VisitRecord>>;
+  getVisit(id: string): Promise<VisitRecord | undefined>;
+  createRecording(visitId: string, input: CreateRecordingInput): Promise<CreateRecordingResult<RecordingMetadata>>;
+  getRecording(id: string): Promise<RecordingMetadata | undefined>;
+  getRecordingVisitId(id: string): Promise<string | undefined>;
+  getAnalysisStatus(id: string): Promise<Pick<RecordingMetadata, 'id' | 'syncState' | 'analysisState'> | undefined>;
+  listRecordings(filters: RecordingFilters): Promise<RecordingPage>;
+  transitionSyncState(id: string, next: SyncState, objectKey?: string): Promise<boolean>;
+  attachStoredObject(id: string, stored: StoredObjectMetadata): Promise<boolean>;
+  transitionAnalysisState(id: string, next: AnalysisState): Promise<boolean>;
 }
 
 function visitInputMatches(visit: VisitRecord, input: CreateVisitInput): boolean {
@@ -102,7 +111,7 @@ export class DemoRecordingRepository implements RecordingRepository {
   private readonly recordings = new Map<string, RecordingMetadata>();
   private readonly visitByRecordingId = new Map<string, string>();
 
-  createVisit(input: CreateVisitInput): CreateResult<VisitRecord> {
+  async createVisit(input: CreateVisitInput): Promise<CreateResult<VisitRecord>> {
     const existing = this.visits.get(input.id);
     if (existing) {
       return visitInputMatches(existing, input)
@@ -119,11 +128,11 @@ export class DemoRecordingRepository implements RecordingRepository {
     return { kind: 'created', value: visit };
   }
 
-  getVisit(id: string): VisitRecord | undefined {
+  async getVisit(id: string): Promise<VisitRecord | undefined> {
     return this.visits.get(id);
   }
 
-  createRecording(visitId: string, input: CreateRecordingInput): CreateRecordingResult<RecordingMetadata> {
+  async createRecording(visitId: string, input: CreateRecordingInput): Promise<CreateRecordingResult<RecordingMetadata>> {
     const visit = this.visits.get(visitId);
     if (!visit) return { kind: 'parent_not_found' };
 
@@ -155,15 +164,15 @@ export class DemoRecordingRepository implements RecordingRepository {
     return { kind: 'created', value: recording };
   }
 
-  getRecording(id: string): RecordingMetadata | undefined {
+  async getRecording(id: string): Promise<RecordingMetadata | undefined> {
     return this.recordings.get(id);
   }
 
-  getRecordingVisitId(id: string): string | undefined {
+  async getRecordingVisitId(id: string): Promise<string | undefined> {
     return this.visitByRecordingId.get(id);
   }
 
-  getAnalysisStatus(id: string): Pick<RecordingMetadata, 'id' | 'syncState' | 'analysisState'> | undefined {
+  async getAnalysisStatus(id: string): Promise<Pick<RecordingMetadata, 'id' | 'syncState' | 'analysisState'> | undefined> {
     const recording = this.recordings.get(id);
     if (!recording) return undefined;
     return {
@@ -173,7 +182,7 @@ export class DemoRecordingRepository implements RecordingRepository {
     };
   }
 
-  listRecordings(filters: RecordingFilters): RecordingPage {
+  async listRecordings(filters: RecordingFilters): Promise<RecordingPage> {
     const matching = Array.from(this.recordings.values())
       .filter((recording) => !filters.syncState || recording.syncState === filters.syncState)
       .filter((recording) => !filters.analysisState || recording.analysisState === filters.analysisState)
@@ -190,7 +199,7 @@ export class DemoRecordingRepository implements RecordingRepository {
     };
   }
 
-  transitionSyncState(id: string, next: SyncState, objectKey?: string): boolean {
+  async transitionSyncState(id: string, next: SyncState, objectKey?: string): Promise<boolean> {
     const recording = this.recordings.get(id);
     if (!recording || !allowedSyncTransitions[recording.syncState].includes(next)) return false;
     recording.syncState = next;
@@ -199,7 +208,16 @@ export class DemoRecordingRepository implements RecordingRepository {
     return true;
   }
 
-  transitionAnalysisState(id: string, next: AnalysisState): boolean {
+  async attachStoredObject(id: string, stored: StoredObjectMetadata): Promise<boolean> {
+    const recording = this.recordings.get(id);
+    if (!recording || recording.byteLength !== stored.byteLength || recording.mimeType !== stored.mimeType) return false;
+    recording.objectKey = stored.objectKey;
+    recording.storageDriver = stored.driver;
+    recording.sha256 = stored.sha256;
+    return true;
+  }
+
+  async transitionAnalysisState(id: string, next: AnalysisState): Promise<boolean> {
     const recording = this.recordings.get(id);
     if (!recording || !allowedAnalysisTransitions[recording.analysisState].includes(next)) return false;
     recording.analysisState = next;

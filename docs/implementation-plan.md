@@ -86,7 +86,23 @@ At the committed baseline, HEAD is `eedb029 feat: add manual transcript insights
 | D — Single-admin setup | Add one-time administrator bootstrap/account creation in the manager/API, password hashing, authenticated session, protected manager/API routes, logout, and setup-disabled behavior once the first admin exists. No tenant collection, tenant IDs, multi-user/team roles, or tenant-scoped storage config. Storage mode is one server-level environment setting. | API auth owner plus manager owner after session contract approval. Acceptance: first-run creates the one admin; repeat/public creation is refused; unauthenticated users cannot access admin data; no secrets are shipped to Vite. |
 | E — Audio transcription | Choose and verify an approved ASR provider, supported region/languages, account permissions, consent/data residency, cost and retry behavior. Implement provider interface and asynchronous job triggered only after storage confirmation. Persist job state and provider transcript in Mongo. In local mode, provider worker reads the local final file; in S3 mode, it reads that single S3 object. Provide a deterministic fake provider only for tests/demo fallback and label it clearly. | Transcription owner after Phase A schema and Phase B storage completion. Acceptance: a real PWA recording transitions to transcribing and then ready/error; transcript includes segment text and timestamps/speakers/confidence only where provider supplies them; retries are idempotent. |
 | F — Manager transcript experience | Add a real recordings/transcripts view or extend current visit detail: capture metadata, storage/sync state, transcription state, transcript text/segments, timestamps/speaker labels and retry/error status. Preserve existing dashboards and synthetic fixture indicators. Show live transcripts as live, never splice synthetic insight quotes into them. Keep manual transcript import separate and labeled. | Manager owner consumes the stable API only. Acceptance: a newly recorded conversation appears in the manager with its own transcript after transcription; loading/empty/error states work; synthetic demo charts remain explicitly synthetic. |
-| G — Integrated demo verification and handoff | Exercise PWA → OPFS offline → reconnect → selected storage adapter → Mongo document → transcription job → persisted transcript → manager detail. Test local mode and S3 mode separately, API restart recovery, duplicate/retry behavior, invalid storage env, provider failure, and synthetic/live labeling. Document required env and commands. | Lead integrates, runs the user-requested verification, reconciles all evidence, and writes one conventional integration commit after approval. |
+| G — Integrated demo verification and handoff | Exercise PWA → OPFS offline → reconnect → selected storage adapter → Mongo document → transcription job → persisted transcript → manager detail. Test local mode and S3 mode separately, API restart recovery, duplicate/retry behavior, invalid storage env, provider failure, and synthetic/live labeling. Document required env and commands. | Lead integrates, runs the requested verification, reconciles evidence, and records the final phase commit. |
+
+### Execution sequence and commit gates
+
+The user has now approved implementation and requested a commit after every completed phase. Follow this narrower sequence; finish and commit each phase before opening dependent feature work. The lead owns every integration commit. Sub-agents may implement bounded work but do not commit directly.
+
+| Execution phase | Work and exit gate | Commit subject |
+| --- | --- | --- |
+| 0 — Repository recovery | Keep local recording files on disk but remove them from Git tracking; ignore API upload/runtime directories. Completed as `f4eaa58`. | `chore: ignore local recording artifacts` |
+| 1 — Mongo + storage foundation | Async repository contract; persistent visits/recordings; strict `STORAGE_DRIVER`; one local or S3 final-object adapter; API runtime wiring and env docs. Confirm the service never writes audio bytes to Mongo and upload chunks remain temporary transport only. | `feat: persist recordings with configurable storage` |
+| 2 — PWA sync integration | Reconcile existing OPFS chunk transport with the selected storage adapter; add safe idempotency, digest/size validation, one final object, status copy driven by server config, and durable completion before PWA marks uploaded. | `fix: resume recording sync to configured storage` |
+| 3 — Single administrator | First-run account setup, password hashing, login/logout, protected manager routes/session, and setup closure after first account. No tenant/user-role system. | `feat: add single-admin account setup` |
+| 4 — OpenAI transcription | Async transcription job after durable audio storage; server-only `OPENAI_API_KEY`; use the current OpenAI Audio Transcriptions API with `gpt-transcribe`; persist transcript and status in Mongo. | `feat: transcribe stored recordings with OpenAI` |
+| 5 — Manager transcript display | Show live recording metadata, transcript state, and actual transcript text in the manager; loading, empty and failure states; synthetic fixtures stay visibly synthetic. | `feat: display recording transcripts in manager` |
+| 6 — End-to-end handoff | Verify local and S3 storage paths where credentials/services are available, offline recovery, Mongo restart persistence, one-object idempotency, OpenAI success/failure, and manager rendering; update runbook and acceptance notes. | `docs: document recording transcription workflow` |
+
+OpenAI implementation constraint from the official speech-to-text guide: `gpt-transcribe` accepts supported audio files including WebM up to 25 MB. Larger conversations must retain one final audio object but be prepared for transcription with an audio-aware server-side split/compression strategy; do not send fabricated speaker labels, timestamps, or confidence when the selected model returns plain transcript text. Store and display the transcript as returned, with provider/model, language only when provided, and job provenance.
 
 ### Configuration contract to implement
 
@@ -136,7 +152,7 @@ After implementation and verification, suggested cohesive commit:
 feat: persist recordings and display live transcripts
 ```
 
-Do not create this commit until the user approves the plan, the implementation is complete, and the current uncommitted audio artifacts have been excluded from staging.
+The plan is approved for implementation. Use the execution sequence and per-phase commit subjects above; keep captured audio artifacts outside Git staging.
 
 ## 1. Outcome and product boundary
 

@@ -1,4 +1,5 @@
 export type SyncState = 'queued' | 'uploading' | 'uploaded' | 'error';
+export type StorageDriver = 'local' | 's3';
 export type AnalysisState = 'not_started' | 'transcribing' | 'analyzing' | 'ready' | 'error';
 export type VisitOutcome = 'order_placed' | 'follow_up' | 'no_order' | 'new_outlet' | 'not_stated';
 export type Confidence = 'high' | 'medium' | 'low';
@@ -24,6 +25,8 @@ export interface RecordingMetadata {
   mimeType: string;
   byteLength: number;
   objectKey?: string;
+  storageDriver?: StorageDriver;
+  sha256?: string;
   syncState: SyncState;
   analysisState: AnalysisState;
 }

@@ -10,10 +10,13 @@ import {
 } from './repositories/manual-transcript-repository';
 import { analyzeManualTranscript } from './services/manual-transcript-analysis';
 import { LocalRecordingStorage } from './services/local-recording-storage';
+import { createRecordingStorage, type RecordingObjectStorage } from './services/storage/recording-storage';
+import { readStorageConfig } from './services/storage/config';
 import {
-  S3RecordingUploads,
-  UploadedObjectValidationError
+  S3RecordingUploads
 } from './services/s3-recording-uploads';
+
+const MAX_RECORDING_BYTES = 25 * 1024 * 1024;
 
 const syncStateSchema = t.Union([
   t.Literal('queued'),
@@ -56,6 +59,8 @@ const recordingSchema = t.Object({
   mimeType: t.String(),
   byteLength: t.Number(),
   objectKey: t.Optional(t.String()),
+  storageDriver: t.Optional(t.Union([t.Literal('local'), t.Literal('s3')])),
+  sha256: t.Optional(t.String()),
   syncState: syncStateSchema,
   analysisState: analysisStateSchema
 });
@@ -85,7 +90,7 @@ const createRecordingBody = t.Object({
   startedAt: t.String({ format: 'date-time' }),
   durationSeconds: t.Number({ minimum: 0, maximum: 60 * 60 * 8 }),
   mimeType: t.String({ minLength: 1, maxLength: 128 }),
-  byteLength: t.Number({ minimum: 0, maximum: 10 * 1024 * 1024 * 1024 })
+  byteLength: t.Number({ minimum: 1, maximum: MAX_RECORDING_BYTES })
 });
 
 const recordingParams = t.Object({ recordingId: t.String({ minLength: 1, maxLength: 128 }) });
@@ -101,13 +106,12 @@ const recordingQuery = t.Object({
   offset: t.Optional(t.Numeric({ minimum: 0, maximum: 100000 }))
 });
 
+const uploadUnavailableSchema = t.Object({ code: t.String(), message: t.String() });
 const signedUrlSchema = t.Object({
   url: t.String({ format: 'uri' }),
   objectKey: t.String(),
   expiresAt: t.String({ format: 'date-time' })
 });
-
-const uploadUnavailableSchema = t.Object({ code: t.String(), message: t.String() });
 
 const transcriptSegmentSchema = t.Object({
   id: t.String(),
@@ -207,9 +211,10 @@ const createManualTranscriptBody = t.Object({
 const transcriptParams = t.Object({ transcriptId: t.String({ minLength: 1, maxLength: 128 }) });
 
 export interface ApiRuntimeInfo {
-  persistence: 'in-memory-demo';
+  persistence: 'in-memory-demo' | 'mongodb';
   uploads: 'configured' | 'not-configured';
   analysis: 'not-configured';
+  storageDriver: 'local' | 's3';
 }
 
 /**
@@ -220,16 +225,18 @@ export function createApp(
   repository: RecordingRepository = new DemoRecordingRepository(),
   uploads: S3RecordingUploads = new S3RecordingUploads(),
   transcripts: ManualTranscriptRepository = new InMemoryManualTranscriptRepository(),
-  localStorage: LocalRecordingStorage = new LocalRecordingStorage()
+  localStorage: LocalRecordingStorage = new LocalRecordingStorage(Bun.env.LOCAL_UPLOAD_STAGING_DIR ?? './var/upload-staging'),
+  recordingStorage: RecordingObjectStorage = createRecordingStorage(readStorageConfig())
 ) {
   return new Elysia()
     .get('/health', () => ({
       status: 'ok' as const,
       service: 'itc-field-source-api',
       runtime: {
-        persistence: 'in-memory-demo' as const,
-        uploads: 'configured' as const,
-        analysis: 'not-configured' as const
+        persistence: repository instanceof DemoRecordingRepository ? 'in-memory-demo' as const : 'mongodb' as const,
+        uploads: uploads.configured ? 'configured' as const : 'not-configured' as const,
+        analysis: 'not-configured' as const,
+        storageDriver: recordingStorage.driver
       } satisfies ApiRuntimeInfo
     }))
     .post('/v1/transcripts', {
@@ -330,8 +337,8 @@ export function createApp(
         201: visitSchema,
         409: errorSchema
       }
-    }, ({ body, status }) => {
-      const result = repository.createVisit(body);
+    }, async ({ body, status }) => {
+      const result = await repository.createVisit(body);
       if (result.kind === 'conflict') {
         return status(409, {
           code: 'visit_id_conflict',
@@ -346,8 +353,8 @@ export function createApp(
         200: visitSchema,
         404: errorSchema
       }
-    }, ({ params, status }) => {
-      const visit = repository.getVisit(params.visitId);
+    }, async ({ params, status }) => {
+      const visit = await repository.getVisit(params.visitId);
       if (!visit) {
         return status(404, {
           code: 'visit_not_found',
@@ -365,8 +372,8 @@ export function createApp(
         404: errorSchema,
         409: errorSchema
       }
-    }, ({ params, body, status }) => {
-      const result = repository.createRecording(params.visitId, body);
+    }, async ({ params, body, status }) => {
+      const result = await repository.createRecording(params.visitId, body);
       if (result.kind === 'parent_not_found') {
         return status(404, {
           code: 'visit_not_found',
@@ -385,7 +392,7 @@ export function createApp(
     .get('/v1/recordings', {
       query: recordingQuery,
       response: recordingPageSchema
-    }, ({ query }) => {
+    }, async ({ query }) => {
       return repository.listRecordings({
         syncState: query.syncState as SyncState | undefined,
         analysisState: query.analysisState as AnalysisState | undefined,
@@ -399,7 +406,7 @@ export function createApp(
       params: recordingChunkParams,
       response: { 200: t.Object({ received: t.Boolean() }), 404: errorSchema, 409: errorSchema, 500: errorSchema }
     }, async ({ params, request, status }) => {
-      const recording = repository.getRecording(params.recordingId);
+      const recording = await repository.getRecording(params.recordingId);
       if (!recording) return status(404, { code: 'recording_not_found', message: 'Register visit details before uploading audio.' });
       const bytes = new Uint8Array(await request.arrayBuffer());
       if (params.chunkIndex >= params.chunkCount || bytes.byteLength > 1024 * 1024) return status(409, { code: 'invalid_audio_chunk', message: 'The audio chunk is invalid.' });
@@ -414,84 +421,43 @@ export function createApp(
       params: recordingParams,
       response: { 200: recordingSchema, 404: errorSchema, 409: errorSchema, 500: errorSchema }
     }, async ({ params, status }) => {
-      const recording = repository.getRecording(params.recordingId);
+      let recording = await repository.getRecording(params.recordingId);
       if (!recording) return status(404, { code: 'recording_not_found', message: 'Recording metadata was not found.' });
       try {
+        if (recording.syncState === 'uploaded') return recording;
         const bytes = new Uint8Array(await localStorage.read(recording.id, recording.startedAt, recording.mimeType));
         if (bytes.byteLength !== recording.byteLength) return status(409, { code: 'audio_size_mismatch', message: 'Uploaded chunks do not match recording size.' });
-        const objectKey = localStorage.keyFor(recording.id, recording.startedAt, recording.mimeType);
-        if (recording.syncState === 'queued') repository.transitionSyncState(recording.id, 'uploading', objectKey);
-        if (repository.getRecording(recording.id)?.syncState === 'uploading') repository.transitionSyncState(recording.id, 'uploaded', objectKey);
-        return repository.getRecording(recording.id)!;
-      } catch {
-        return status(500, { code: 'local_audio_finalize_failed', message: 'The API could not assemble the uploaded audio chunks.' });
-      }
-    })
-    .post('/v1/recordings/:recordingId/upload-url', {
-      params: recordingParams,
-      response: {
-        200: signedUrlSchema,
-        404: errorSchema,
-        409: errorSchema,
-        503: uploadUnavailableSchema
-      }
-    }, async ({ params, status }) => {
-      let recording = repository.getRecording(params.recordingId);
-      if (!recording) return status(404, { code: 'recording_not_found', message: 'The recording metadata was not found.' });
-      if (!uploads.configured) return status(503, { code: 's3_not_configured', message: 'S3 upload is not configured on the API.' });
-      if (recording.syncState === 'uploaded') {
-        return status(409, { code: 'recording_already_uploaded', message: 'This recording has already been uploaded.' });
-      }
 
-      if (recording.syncState === 'error') {
-        repository.transitionSyncState(recording.id, 'queued');
-        recording = repository.getRecording(recording.id)!;
-      }
-      const objectKey = recording.objectKey ?? uploads.objectKeyFor(recording);
-      if (recording.syncState === 'queued') {
-        const transitioned = repository.transitionSyncState(recording.id, 'uploading', objectKey);
-        if (!transitioned) return status(409, { code: 'recording_upload_conflict', message: 'The recording upload state changed. Request a fresh upload target.' });
-        recording = repository.getRecording(recording.id)!;
-      }
-      if (recording.syncState !== 'uploading' || !recording.objectKey) {
-        return status(409, { code: 'recording_not_uploadable', message: 'The recording is not ready for an S3 upload.' });
-      }
-
-      try {
-        return await uploads.createUploadUrl(recording, recording.objectKey);
-      } catch {
-        repository.transitionSyncState(recording.id, 'error');
-        return status(503, { code: 's3_signing_failed', message: 'The API could not sign an S3 upload. Check its AWS credentials and retry.' });
-      }
-    })
-    .post('/v1/recordings/:recordingId/upload-complete', {
-      params: recordingParams,
-      response: {
-        200: recordingSchema,
-        404: errorSchema,
-        409: errorSchema,
-        503: uploadUnavailableSchema
-      }
-    }, async ({ params, status }) => {
-      let recording: RecordingMetadata | undefined = repository.getRecording(params.recordingId);
-      if (!recording) return status(404, { code: 'recording_not_found', message: 'The recording metadata was not found.' });
-      if (!uploads.configured) return status(503, { code: 's3_not_configured', message: 'S3 upload is not configured on the API.' });
-      if (recording.syncState === 'uploaded') return recording;
-      if (recording.syncState !== 'uploading' || !recording.objectKey) {
-        return status(409, { code: 'recording_not_uploading', message: 'The recording has no active S3 upload to complete.' });
-      }
-      try {
-        await uploads.verifyUploadedObject(recording);
-      } catch (error) {
-        if (error instanceof UploadedObjectValidationError) {
-          repository.transitionSyncState(recording.id, 'error');
-          return status(409, { code: 'uploaded_audio_invalid', message: error.message });
+        if (recording.syncState === 'error') {
+          await repository.transitionSyncState(recording.id, 'queued');
+          recording = (await repository.getRecording(recording.id))!;
         }
-        return status(503, { code: 's3_verification_failed', message: 'The API could not verify the S3 upload. Retry completion when the API is reachable.' });
+        if (recording.syncState === 'queued') {
+          const started = await repository.transitionSyncState(recording.id, 'uploading');
+          if (!started) return status(409, { code: 'recording_upload_conflict', message: 'The recording upload state changed. Retry completion.' });
+        } else if (recording.syncState !== 'uploading') {
+          return status(409, { code: 'recording_not_uploadable', message: 'The recording is not ready for storage.' });
+        }
+
+        const stored = await recordingStorage.putFinal({
+          id: recording.id,
+          startedAt: recording.startedAt,
+          mimeType: recording.mimeType,
+          bytes
+        });
+        const attached = await repository.attachStoredObject(recording.id, stored);
+        if (!attached) return status(409, { code: 'recording_metadata_mismatch', message: 'Stored audio did not match the registered recording metadata.' });
+        await repository.transitionSyncState(recording.id, 'uploaded', stored.objectKey);
+        recording = (await repository.getRecording(recording.id))!;
+        await localStorage.removeStaged(recording.id, recording.startedAt, recording.mimeType);
+        return recording;
+      } catch {
+        const current = await repository.getRecording(params.recordingId);
+        if (current && (current.syncState === 'queued' || current.syncState === 'uploading')) {
+          await repository.transitionSyncState(current.id, 'error');
+        }
+        return status(500, { code: 'audio_finalize_failed', message: 'The API could not persist the finalized conversation audio. The device copy remains queued for retry.' });
       }
-      repository.transitionSyncState(recording.id, 'uploaded', recording.objectKey);
-      recording = repository.getRecording(recording.id)!;
-      return recording;
     })
     .get('/v1/recordings/:recordingId/download-url', {
       params: recordingParams,
@@ -501,17 +467,51 @@ export function createApp(
         409: errorSchema,
         503: uploadUnavailableSchema
       }
-    }, async ({ params, status }) => {
-      const recording = repository.getRecording(params.recordingId);
+    }, async ({ params, request, status }) => {
+      const recording = await repository.getRecording(params.recordingId);
       if (!recording) return status(404, { code: 'recording_not_found', message: 'The recording metadata was not found.' });
-      if (!uploads.configured) return status(503, { code: 's3_not_configured', message: 'S3 upload is not configured on the API.' });
-      if (recording.syncState !== 'uploaded' || !recording.objectKey) {
-        return status(409, { code: 'recording_not_uploaded', message: 'This recording does not have an uploaded S3 object.' });
+      if (recording.syncState !== 'uploaded' || !recording.objectKey || !recording.storageDriver) {
+        return status(409, { code: 'recording_not_uploaded', message: 'This conversation does not have a stored audio file.' });
+      }
+      if (recording.storageDriver === 's3') {
+        try {
+          return {
+            ...await recordingStorage.createDownloadUrl(recording.objectKey),
+            objectKey: recording.objectKey
+          };
+        } catch {
+          return status(503, { code: 'recording_link_failed', message: 'The API could not create a temporary S3 playback link.' });
+        }
+      }
+      const origin = new URL(request.url).origin;
+      return {
+        url: new URL(`/v1/recordings/${encodeURIComponent(recording.id)}/audio`, origin).toString(),
+        objectKey: recording.objectKey,
+        expiresAt: new Date(Date.now() + 5 * 60_000).toISOString()
+      };
+    })
+    .get('/v1/recordings/:recordingId/audio', {
+      params: recordingParams,
+      response: { 404: errorSchema, 409: errorSchema }
+    }, async ({ params, status }) => {
+      const recording = await repository.getRecording(params.recordingId);
+      if (!recording) return status(404, { code: 'recording_not_found', message: 'The recording metadata was not found.' });
+      if (recording.syncState !== 'uploaded' || !recording.objectKey || recording.storageDriver !== 'local') {
+        return status(409, { code: 'recording_not_available', message: 'The local audio file is not available.' });
       }
       try {
-        return await uploads.createDownloadUrl(recording);
+        const audio = await recordingStorage.readFinal(recording.objectKey);
+        const body = new Uint8Array(new ArrayBuffer(audio.byteLength));
+        body.set(audio);
+        return new Response(body, {
+          headers: {
+            'Content-Type': recording.mimeType,
+            'Content-Length': String(audio.byteLength),
+            'Cache-Control': 'private, no-store'
+          }
+        });
       } catch {
-        return status(503, { code: 's3_signing_failed', message: 'The API could not sign an S3 playback link.' });
+        return status(404, { code: 'recording_file_missing', message: 'The stored local audio file is missing.' });
       }
     })
     .get('/v1/recordings/:recordingId/analysis', {
@@ -520,8 +520,8 @@ export function createApp(
         200: analysisStatusSchema,
         404: errorSchema
       }
-    }, ({ params, status }) => {
-      const analysis = repository.getAnalysisStatus(params.recordingId);
+    }, async ({ params, status }) => {
+      const analysis = await repository.getAnalysisStatus(params.recordingId);
       if (!analysis) {
         return status(404, {
           code: 'recording_not_found',
@@ -536,8 +536,8 @@ export function createApp(
         200: recordingSchema,
         404: errorSchema
       }
-    }, ({ params, status }) => {
-      const recording: RecordingMetadata | undefined = repository.getRecording(params.recordingId);
+    }, async ({ params, status }) => {
+      const recording: RecordingMetadata | undefined = await repository.getRecording(params.recordingId);
       if (!recording) {
         return status(404, {
           code: 'recording_not_found',
@@ -552,15 +552,15 @@ export function createApp(
         200: visitSchema,
         404: errorSchema
       }
-    }, ({ params, status }) => {
-      const visitId = repository.getRecordingVisitId(params.recordingId);
+    }, async ({ params, status }) => {
+      const visitId = await repository.getRecordingVisitId(params.recordingId);
       if (!visitId) {
         return status(404, {
           code: 'recording_not_found',
           message: 'The recording or its visit does not exist in this demo API instance.'
         });
       }
-      const visit = repository.getVisit(visitId);
+      const visit = await repository.getVisit(visitId);
       if (!visit) {
         return status(404, {
           code: 'visit_not_found',

@@ -12,9 +12,10 @@ export interface ApiClientOptions {
 const DEFAULT_API_REQUEST_TIMEOUT_MS = 25_000;
 
 export interface ApiRuntimeHealth {
-  persistence: 'in-memory-demo';
+  persistence: 'in-memory-demo' | 'mongodb';
   uploads: 'configured' | 'not-configured';
   analysis: 'not-configured';
+  storageDriver: 'local' | 's3';
 }
 
 export interface SignedRecordingUrl {
@@ -98,8 +99,6 @@ export interface ApiClient {
   createVisitRecording(visitId: string, input: CreateRecordingRequest): Promise<RecordingMetadata>;
   getRecording(recordingId: string): Promise<RecordingMetadata>;
   listRecordings(query?: ListRecordingsQuery): Promise<RecordingPage>;
-  createRecordingUploadUrl(recordingId: string): Promise<SignedRecordingUrl>;
-  completeRecordingUpload(recordingId: string): Promise<RecordingMetadata>;
   getRecordingDownloadUrl(recordingId: string): Promise<SignedRecordingUrl>;
   uploadRecordingAudio(recordingId: string, file: Blob, onChunk?: (sent: number, total: number) => void): Promise<RecordingMetadata>;
   ingestTranscript(input: CreateManualTranscriptRequest): Promise<ManualTranscriptAnalysis>;
@@ -210,14 +209,6 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
       const suffix = queryString ? '?' + queryString : '';
       return request<RecordingPage>('/v1/recordings' + suffix);
     },
-    createRecordingUploadUrl: (recordingId) => request<SignedRecordingUrl>(
-      '/v1/recordings/' + encodeURIComponent(recordingId) + '/upload-url',
-      { method: 'POST' }
-    ),
-    completeRecordingUpload: (recordingId) => request<RecordingMetadata>(
-      '/v1/recordings/' + encodeURIComponent(recordingId) + '/upload-complete',
-      { method: 'POST' }
-    ),
     getRecordingDownloadUrl: (recordingId) => request<SignedRecordingUrl>(
       '/v1/recordings/' + encodeURIComponent(recordingId) + '/download-url'
     ),
