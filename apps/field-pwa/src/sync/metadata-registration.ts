@@ -3,6 +3,8 @@ import type { RecordingMetadata } from '@itc/domain';
 import { recordingStore } from '../storage/recording-store';
 import type { LocalRecording } from '../storage/indexed-db';
 
+const MAX_OPENAI_TRANSCRIPTION_BYTES = 25 * 1024 * 1024;
+
 export interface MetadataRegistrationResult {
   visit: VisitRecord;
   recording: RecordingMetadata;
@@ -69,6 +71,14 @@ export async function registerFinalizedMetadata(
 
   await recordingStore.setMetadataRegistrationState(recordingId, 'registering');
   try {
+    if (localRecording.byteLength > MAX_OPENAI_TRANSCRIPTION_BYTES) {
+      throw new ApiClientError(
+        'This recording is larger than 25 MiB. It remains saved on this device, but the current transcription service cannot accept it. Shorten the recording before retrying sync.',
+        413,
+        'recording_too_large',
+        false
+      );
+    }
     // Both IDs and request bodies are persisted locally, so a retry after a
     // lost response replays the exact idempotent API operations.
     const visit = await client.createVisit(visitRequest(localRecording));

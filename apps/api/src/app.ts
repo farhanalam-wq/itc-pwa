@@ -9,7 +9,7 @@ import {
   type ManualTranscriptRepository
 } from './repositories/manual-transcript-repository';
 import { analyzeManualTranscript } from './services/manual-transcript-analysis';
-import { LocalRecordingStorage } from './services/local-recording-storage';
+import { LocalRecordingStorage, RECORDING_UPLOAD_CHUNK_BYTES, UploadStagingError } from './services/local-recording-storage';
 import { createRecordingStorage, type RecordingObjectStorage } from './services/storage/recording-storage';
 import { readStorageConfig } from './services/storage/config';
 import {
@@ -17,6 +17,28 @@ import {
 } from './services/s3-recording-uploads';
 
 const MAX_RECORDING_BYTES = 25 * 1024 * 1024;
+
+async function readBoundedAudioChunk(request: Request): Promise<Uint8Array> {
+  const declaredLength = Number(request.headers.get('content-length'));
+  if (Number.isFinite(declaredLength) && declaredLength > RECORDING_UPLOAD_CHUNK_BYTES) {
+    throw new UploadStagingError('Audio transport chunks must be no larger than 1 MiB.', 'upload_invalid');
+  }
+  const reader = request.body?.getReader();
+  if (!reader) return new Uint8Array();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > RECORDING_UPLOAD_CHUNK_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      throw new UploadStagingError('Audio transport chunks must be no larger than 1 MiB.', 'upload_invalid');
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks, total);
+}
 
 const syncStateSchema = t.Union([
   t.Literal('queued'),
@@ -404,29 +426,62 @@ export function createApp(
     })
     .put('/v1/recordings/:recordingId/audio/:chunkIndex/:chunkCount', {
       params: recordingChunkParams,
-      response: { 200: t.Object({ received: t.Boolean() }), 404: errorSchema, 409: errorSchema, 500: errorSchema }
+      response: { 200: t.Object({ received: t.Boolean() }), 400: errorSchema, 404: errorSchema, 409: errorSchema, 500: errorSchema }
     }, async ({ params, request, status }) => {
       const recording = await repository.getRecording(params.recordingId);
       if (!recording) return status(404, { code: 'recording_not_found', message: 'Register visit details before uploading audio.' });
-      const bytes = new Uint8Array(await request.arrayBuffer());
-      if (params.chunkIndex >= params.chunkCount || bytes.byteLength > 1024 * 1024) return status(409, { code: 'invalid_audio_chunk', message: 'The audio chunk is invalid.' });
+      if (recording.syncState === 'uploaded') return status(409, { code: 'recording_already_uploaded', message: 'This conversation audio is already stored.' });
+      if (!Number.isInteger(params.chunkIndex) || !Number.isInteger(params.chunkCount)
+        || params.chunkCount < 1 || params.chunkIndex < 0 || params.chunkIndex >= params.chunkCount) {
+        return status(409, { code: 'invalid_audio_chunk', message: 'The audio chunk index or count is invalid.' });
+      }
+      const expectedChunkCount = Math.ceil(recording.byteLength / RECORDING_UPLOAD_CHUNK_BYTES);
+      const expectedChunkLength = Math.min(RECORDING_UPLOAD_CHUNK_BYTES, recording.byteLength - params.chunkIndex * RECORDING_UPLOAD_CHUNK_BYTES);
+      if (params.chunkCount !== expectedChunkCount || params.chunkIndex >= expectedChunkCount) {
+        return status(409, { code: 'invalid_audio_chunk', message: 'The audio chunk size or count does not match the registered recording.' });
+      }
+      let bytes: Uint8Array;
       try {
-        await localStorage.saveChunk({ id: recording.id, startedAt: recording.startedAt, mimeType: recording.mimeType, index: params.chunkIndex, total: params.chunkCount, bytes });
+        bytes = await readBoundedAudioChunk(request);
+      } catch (error) {
+        if (error instanceof UploadStagingError) return status(409, { code: error.code, message: error.message });
+        return status(400, { code: 'audio_chunk_invalid', message: 'The audio chunk could not be read. Retry from the device.' });
+      }
+      if (bytes.byteLength !== expectedChunkLength) {
+        return status(409, { code: 'invalid_audio_chunk', message: 'The audio chunk size does not match the registered recording.' });
+      }
+      try {
+        await localStorage.saveChunk({
+          id: recording.id,
+          startedAt: recording.startedAt,
+          mimeType: recording.mimeType,
+          index: params.chunkIndex,
+          total: params.chunkCount,
+          expectedByteLength: recording.byteLength,
+          bytes
+        });
         return { received: true };
-      } catch {
-        return status(500, { code: 'local_audio_store_failed', message: 'The API could not save audio in its local recordings folder.' });
+      } catch (error) {
+        if (error instanceof UploadStagingError) {
+          return status(409, { code: error.code, message: error.message });
+        }
+        return status(500, { code: 'audio_chunk_store_failed', message: 'The API could not safely stage this audio chunk. The device copy remains available for retry.' });
       }
     })
     .post('/v1/recordings/:recordingId/audio/complete', {
       params: recordingParams,
-      response: { 200: recordingSchema, 404: errorSchema, 409: errorSchema, 500: errorSchema }
+      response: { 200: recordingSchema, 404: errorSchema, 409: errorSchema, 500: errorSchema, 503: errorSchema }
     }, async ({ params, status }) => {
       let recording = await repository.getRecording(params.recordingId);
       if (!recording) return status(404, { code: 'recording_not_found', message: 'Recording metadata was not found.' });
       try {
         if (recording.syncState === 'uploaded') return recording;
-        const bytes = new Uint8Array(await localStorage.read(recording.id, recording.startedAt, recording.mimeType));
-        if (bytes.byteLength !== recording.byteLength) return status(409, { code: 'audio_size_mismatch', message: 'Uploaded chunks do not match recording size.' });
+        const bytes = await localStorage.assemble({
+          id: recording.id,
+          startedAt: recording.startedAt,
+          mimeType: recording.mimeType,
+          expectedByteLength: recording.byteLength
+        });
 
         if (recording.syncState === 'error') {
           await repository.transitionSyncState(recording.id, 'queued');
@@ -447,11 +502,17 @@ export function createApp(
         });
         const attached = await repository.attachStoredObject(recording.id, stored);
         if (!attached) return status(409, { code: 'recording_metadata_mismatch', message: 'Stored audio did not match the registered recording metadata.' });
-        await repository.transitionSyncState(recording.id, 'uploaded', stored.objectKey);
+        const completed = await repository.transitionSyncState(recording.id, 'uploaded', stored.objectKey);
         recording = (await repository.getRecording(recording.id))!;
-        await localStorage.removeStaged(recording.id, recording.startedAt, recording.mimeType);
+        if (!completed && recording.syncState !== 'uploaded') {
+          return status(503, { code: 'recording_finalize_pending', message: 'The audio is stored, but the API has not confirmed completion yet. Retry sync from the device.' });
+        }
+        await localStorage.removeStaged(recording.id, recording.startedAt, recording.mimeType).catch(() => undefined);
         return recording;
-      } catch {
+      } catch (error) {
+        if (error instanceof UploadStagingError) {
+          return status(409, { code: error.code, message: error.message });
+        }
         const current = await repository.getRecording(params.recordingId);
         if (current && (current.syncState === 'queued' || current.syncState === 'uploading')) {
           await repository.transitionSyncState(current.id, 'error');

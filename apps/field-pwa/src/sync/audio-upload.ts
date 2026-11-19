@@ -21,7 +21,7 @@ export interface ChunkUploadProgress {
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'The S3 audio upload failed.';
+  return error instanceof Error ? error.message : 'The conversation audio upload failed.';
 }
 
 function isRetryable(error: unknown): boolean {

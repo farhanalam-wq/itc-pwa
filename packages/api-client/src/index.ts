@@ -174,7 +174,8 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
       const retryable = response.status === 408
         || response.status === 425
         || response.status === 429
-        || response.status >= 500;
+        || response.status >= 500
+        || (response.status === 409 && apiError?.code === 'upload_incomplete');
       throw new ApiClientError(
         apiError?.message ?? `The API returned HTTP ${response.status}.`,
         response.status,
