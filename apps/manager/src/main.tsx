@@ -10,7 +10,7 @@ import {
   type DemoSignalAggregate
 } from '@itc/demo-data';
 import { ReportChart } from '@itc/charts';
-import type { AnalysisState, ManualTranscriptAnalysis, RecordingMetadata, SyncState } from '@itc/domain';
+import type { AnalysisState, ManualTranscriptAnalysis, RecordingMetadata, RecordingTranscript, SyncState } from '@itc/domain';
 import { OverviewPanel } from './overview-panel';
 import { TranscriptImportForm, type TranscriptImportInput } from './transcript-import-form';
 import '@fontsource-variable/hanken-grotesk';
@@ -20,6 +20,10 @@ type View = 'overview' | 'insights' | 'team' | 'visits';
 type Period = '7' | '30' | 'all';
 type CaptureApiState = 'loading' | 'available' | 'unavailable';
 type TranscriptImportStatus = { kind: 'success' | 'error' | 'info'; message: string } | null;
+type CaptureTranscriptState =
+  | { kind: 'loading' }
+  | { kind: 'error'; message: string }
+  | { kind: 'loaded'; transcript: RecordingTranscript; refreshError?: string };
 
 const captureApi = createApiClient({ baseUrl: '/api' });
 
@@ -31,11 +35,11 @@ const syncStateDetails: Record<SyncState, { label: string; detail: string }> = {
 };
 
 const analysisStateDetails: Record<AnalysisState, { label: string; detail: string }> = {
-  not_started: { label: 'not_started', detail: 'No transcription or insights yet.' },
-  transcribing: { label: 'transcribing', detail: 'Transcription is in progress.' },
-  analyzing: { label: 'analyzing', detail: 'Insight analysis is in progress.' },
-  ready: { label: 'ready', detail: 'Analysis is marked ready; no transcript is shown here.' },
-  error: { label: 'error', detail: 'Analysis did not complete.' }
+  not_started: { label: 'Not started', detail: 'Transcript processing has not started.' },
+  transcribing: { label: 'Transcribing', detail: 'The stored audio is being transcribed.' },
+  analyzing: { label: 'Processing', detail: 'The stored audio is being processed.' },
+  ready: { label: 'Transcript ready', detail: 'Transcript text is available from the uploaded recording.' },
+  error: { label: 'Transcription failed', detail: 'The audio is stored; transcription needs attention.' }
 };
 
 const palette = {
@@ -340,6 +344,9 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
   const [activeCaptureAudio, setActiveCaptureAudio] = useState<{ id: string; url: string } | null>(null);
   const [captureAudioLoading, setCaptureAudioLoading] = useState<string | null>(null);
   const [capturePlaybackError, setCapturePlaybackError] = useState<string | null>(null);
+  const [captureTranscriptStates, setCaptureTranscriptStates] = useState<Record<string, CaptureTranscriptState>>({});
+  const [selectedCaptureTranscriptId, setSelectedCaptureTranscriptId] = useState<string | null>(null);
+  const [captureTranscriptRetrying, setCaptureTranscriptRetrying] = useState<string | null>(null);
   const [manualTranscripts, setManualTranscripts] = useState<ManualTranscriptAnalysis[]>([]);
   const [transcriptApiState, setTranscriptApiState] = useState<CaptureApiState>('loading');
   const [transcriptImportBusy, setTranscriptImportBusy] = useState(false);
@@ -382,6 +389,35 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
     const timer = window.setInterval(() => void refreshFieldCaptures(), 30_000);
     return () => window.clearInterval(timer);
   }, [refreshFieldCaptures]);
+
+  const loadCaptureTranscript = useCallback(async (recordingId: string) => {
+    setCaptureTranscriptStates((current) => current[recordingId]?.kind === 'loaded'
+      ? current
+      : { ...current, [recordingId]: { kind: 'loading' } });
+    try {
+      const transcript = await captureApi.getRecordingTranscript(recordingId);
+      setCaptureTranscriptStates((current) => ({ ...current, [recordingId]: { kind: 'loaded', transcript } }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'The transcript could not be loaded.';
+      setCaptureTranscriptStates((current) => {
+        const existing = current[recordingId];
+        return {
+          ...current,
+          [recordingId]: existing?.kind === 'loaded'
+            ? { ...existing, refreshError: message }
+            : { kind: 'error', message }
+        };
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!selectedCaptureTranscriptId) return;
+    const current = captureTranscriptStates[selectedCaptureTranscriptId];
+    if (current?.kind !== 'loaded' || !['queued', 'processing'].includes(current.transcript.state)) return;
+    const timer = window.setInterval(() => void loadCaptureTranscript(selectedCaptureTranscriptId), 3_500);
+    return () => window.clearInterval(timer);
+  }, [captureTranscriptStates, loadCaptureTranscript, selectedCaptureTranscriptId]);
 
   const territories = useMemo(() => [...new Set([
     ...demoConversations.map((item) => item.territoryName ?? item.territoryId),
@@ -721,6 +757,70 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
     }
   }
 
+  function toggleCaptureTranscript(recordingId: string) {
+    if (selectedCaptureTranscriptId === recordingId) {
+      setSelectedCaptureTranscriptId(null);
+      return;
+    }
+    setSelectedCaptureTranscriptId(recordingId);
+    const transcriptState = captureTranscriptStates[recordingId];
+    if (transcriptState?.kind !== 'loaded') void loadCaptureTranscript(recordingId);
+  }
+
+  async function retryCaptureTranscript(recordingId: string) {
+    setCaptureTranscriptRetrying(recordingId);
+    setCaptureTranscriptStates((current) => ({ ...current, [recordingId]: { kind: 'loading' } }));
+    try {
+      const transcript = await captureApi.retryRecordingTranscription(recordingId);
+      setCaptureTranscriptStates((current) => ({ ...current, [recordingId]: { kind: 'loaded', transcript } }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'The transcription could not be retried.';
+      setCaptureTranscriptStates((current) => ({ ...current, [recordingId]: { kind: 'error', message } }));
+    } finally {
+      setCaptureTranscriptRetrying(null);
+    }
+  }
+
+  function hasCompletedCaptureTranscript(recordingId: string): boolean {
+    const transcriptState = captureTranscriptStates[recordingId];
+    return transcriptState?.kind === 'loaded' && transcriptState.transcript.state === 'completed';
+  }
+
+  function renderCaptureTranscript(recordingId: string) {
+    if (selectedCaptureTranscriptId !== recordingId) return null;
+    const transcriptState = captureTranscriptStates[recordingId];
+    return <section className="capture-transcript-panel" aria-label="Recording transcript" aria-live="polite">
+      <div className="capture-transcript-heading"><h3>Transcript from this recording</h3><span>Real PWA audio · separate from synthetic reports</span></div>
+      {!transcriptState && <p className="capture-transcript-loading" role="status">Requesting transcript status…</p>}
+      {transcriptState?.kind === 'loading' && <div className="capture-transcript-loading" role="status"><i aria-hidden="true"/>Loading transcript status…</div>}
+      {transcriptState?.kind === 'error' && <div className="capture-transcript-message" role="alert"><p>{transcriptState.message}</p><button className="transcript-action" type="button" onClick={() => void loadCaptureTranscript(recordingId)}>Try loading again</button></div>}
+      {transcriptState?.kind === 'loaded' && (() => {
+        const { transcript } = transcriptState;
+        const stateLabel: Record<RecordingTranscript['state'], string> = {
+          not_started: 'Not started',
+          queued: 'Queued',
+          processing: 'Transcribing',
+          completed: 'Transcript ready',
+          failed: 'Transcription failed'
+        };
+        return <>
+          <div className="capture-transcript-status-row"><span className={`capture-transcript-status state-${transcript.state}`}>{stateLabel[transcript.state]}</span>{transcript.state === 'completed' && transcript.languageCodes?.length ? <span>Language: {transcript.languageCodes.join(', ')}</span> : null}</div>
+          {transcript.state === 'queued' && <p className="capture-transcript-message" role="status">The stored audio is waiting in the transcription queue.</p>}
+          {transcript.state === 'processing' && <p className="capture-transcript-message" role="status">The stored audio is being transcribed. This panel refreshes while processing continues.</p>}
+          {transcript.state === 'not_started' && <p className="capture-transcript-message" role="status">Transcription has not started yet. Refresh this panel after the audio finishes uploading.</p>}
+          {transcript.state === 'failed' && <div className="capture-transcript-message" role="alert"><p>{transcript.errorMessage ?? 'The recording could not be transcribed.'}</p>{transcript.retryable
+            ? <button className="transcript-action" type="button" onClick={() => void retryCaptureTranscript(recordingId)} disabled={captureTranscriptRetrying === recordingId}>{captureTranscriptRetrying === recordingId ? 'Retrying…' : 'Retry transcription'}</button>
+            : <small>Ask the API operator to check the transcription configuration or recording format.</small>}</div>}
+          {transcript.state === 'completed' && transcript.transcriptText?.trim()
+            ? <p className="capture-transcript-text">{transcript.transcriptText}</p>
+            : transcript.state === 'completed' ? <p className="capture-transcript-message">No transcript text was returned for this recording.</p> : null}
+          {transcript.state === 'completed' && <small className="capture-transcript-provenance">{transcript.provider} · {transcript.model} · transcript text only; no speaker turns or timings were supplied</small>}
+          {transcriptState.refreshError && <p className="capture-transcript-refresh-error" role="status">Could not refresh transcription status: {transcriptState.refreshError}</p>}
+        </>;
+      })()}
+    </section>;
+  }
+
   async function ingestManualTranscript(input: TranscriptImportInput) {
     setTranscriptImportBusy(true);
     setTranscriptImportStatus(null);
@@ -760,9 +860,10 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
         <div className="live-capture-identity"><strong>{recording.outletName}</strong><span>{recording.representativeId} · {recording.territoryId}</span></div>
         <div className="live-capture-meta"><time dateTime={recording.startedAt}>{formatDateTime(recording.startedAt)}</time><span>{formatDuration(Math.round(recording.durationSeconds))}</span><span>{syncStateDetails[recording.syncState].label}</span></div>
         {recording.syncState === 'uploaded'
-          ? <button className="live-audio-button" type="button" onClick={() => void toggleCaptureAudio(recording.id)} disabled={captureAudioLoading === recording.id}>{captureAudioLoading === recording.id ? 'Loading…' : activeCaptureAudio?.id === recording.id ? 'Close audio' : 'Listen to audio'}</button>
+          ? <div className="live-capture-actions"><span className={`capture-compact-status analysis-${recording.analysisState}`}>{analysisStateDetails[recording.analysisState].label}</span><button className="live-audio-button" type="button" onClick={() => void toggleCaptureAudio(recording.id)} disabled={captureAudioLoading === recording.id}>{captureAudioLoading === recording.id ? 'Loading…' : activeCaptureAudio?.id === recording.id ? 'Close audio' : 'Listen to audio'}</button><button className="live-transcript-button" type="button" aria-expanded={selectedCaptureTranscriptId === recording.id} aria-controls={`recording-transcript-${recording.id}`} onClick={() => toggleCaptureTranscript(recording.id)}>{selectedCaptureTranscriptId === recording.id ? 'Hide transcript' : hasCompletedCaptureTranscript(recording.id) ? 'View transcript' : 'Transcript status'}</button></div>
           : <span className={`live-upload-state sync-${recording.syncState}`}>{recording.syncState === 'queued' ? 'Waiting for upload' : recording.syncState === 'uploading' ? 'Uploading' : 'Upload needs attention'}</span>}
         {activeCaptureAudio?.id === recording.id && <audio className="live-capture-player" controls preload="none" src={activeCaptureAudio.url} aria-label={`Uploaded recording from ${recording.outletName}`}/>}
+        <div id={`recording-transcript-${recording.id}`} className="live-transcript-slot" hidden={selectedCaptureTranscriptId !== recording.id}>{renderCaptureTranscript(recording.id)}</div>
       </article>)}
     </section>;
   }
@@ -921,7 +1022,7 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
   function renderFieldPwaCaptures() {
     return <section className="field-pwa-captures" aria-labelledby="field-pwa-captures-title" aria-busy={captureRefreshing}>
       <div className="field-pwa-header">
-        <div><h2 id="field-pwa-captures-title">Field PWA captures</h2><p>Real recording metadata and uploaded audio, kept separate from conversation reports. PWA transcription is not connected yet; timestamps here are the capture start time.</p></div>
+        <div><h2 id="field-pwa-captures-title">Field PWA captures</h2><p>Real recording metadata, uploaded audio, and transcripts from the stored conversation. These recordings stay separate from seeded synthetic reports.</p></div>
         <div className="field-pwa-actions">
           <span className={`field-pwa-api-status ${captureApiState}`} role="status" aria-live="polite"><i aria-hidden="true"/>{captureApiState === 'loading' ? 'Connecting to API' : captureApiState === 'available' ? 'API connected' : 'API unavailable'}</span>
           <button className="button" type="button" onClick={() => void refreshFieldCaptures()} disabled={captureRefreshing}>{captureRefreshing ? 'Refreshing…' : 'Refresh'}</button>
@@ -931,7 +1032,8 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
         {captureRuntime?.persistence === 'in-memory-demo' && <span>In-memory demo metadata</span>}
         {captureRuntime?.uploads === 'not-configured' && <span className="field-pwa-upload-unavailable">S3 upload not configured</span>}
         {captureRuntime?.uploads === 'configured' && <span className="field-pwa-upload-ready">S3 upload configured</span>}
-        {captureRuntime?.analysis === 'not-configured' && <span>Analysis service not configured</span>}
+        {captureRuntime?.analysis === 'not-configured' && <span className="field-pwa-upload-unavailable">OpenAI transcription not configured</span>}
+        {captureRuntime?.analysis === 'configured' && <span className="field-pwa-upload-ready">OpenAI transcription configured</span>}
         {captureLastUpdated && <span>Last API response {formatDateTime(captureLastUpdated.toISOString())}</span>}
       </div>
       {capturePlaybackError && <div className="field-pwa-alert" role="alert">{capturePlaybackError}</div>}
@@ -950,12 +1052,13 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
               <div className="field-pwa-timing"><div><span>Duration</span><strong>{formatDuration(Math.round(recording.durationSeconds))}</strong></div><div><span>PWA start time</span><time dateTime={recording.startedAt}>{formatDateTime(recording.startedAt)}</time></div></div>
               <div className="field-pwa-state-grid">
                 <div className={`field-pwa-state sync-${recording.syncState}`}><span>Sync state</span><strong>syncState={sync.label}</strong><small>{sync.detail}</small></div>
-                <div className={`field-pwa-state analysis-${recording.analysisState}`}><span>Analysis state</span><strong>analysisState={analysis.label}</strong><small>{analysis.detail}</small></div>
+                <div className={`field-pwa-state analysis-${recording.analysisState}`}><span>Transcription</span><strong>{analysis.label}</strong><small>{analysis.detail}</small></div>
               </div>
               <div className="field-pwa-audio-actions">{recording.syncState === 'uploaded'
-                ? <button className="live-audio-button" type="button" onClick={() => void toggleCaptureAudio(recording.id)} disabled={captureAudioLoading === recording.id}>{captureAudioLoading === recording.id ? 'Loading audio…' : activeCaptureAudio?.id === recording.id ? 'Close audio' : 'Listen to uploaded audio'}</button>
+                ? <><button className="live-audio-button" type="button" onClick={() => void toggleCaptureAudio(recording.id)} disabled={captureAudioLoading === recording.id}>{captureAudioLoading === recording.id ? 'Loading audio…' : activeCaptureAudio?.id === recording.id ? 'Close audio' : 'Listen to uploaded audio'}</button><button className="live-transcript-button" type="button" aria-expanded={selectedCaptureTranscriptId === recording.id} aria-controls={`recording-transcript-${recording.id}`} onClick={() => toggleCaptureTranscript(recording.id)}>{selectedCaptureTranscriptId === recording.id ? 'Hide transcript' : hasCompletedCaptureTranscript(recording.id) ? 'View transcript' : 'Check transcript'}</button></>
                 : <span className={`live-upload-state sync-${recording.syncState}`}>{recording.syncState === 'queued' ? 'Audio queued for S3' : recording.syncState === 'uploading' ? 'Audio uploading' : 'Upload needs attention'}</span>}</div>
               {activeCaptureAudio?.id === recording.id && <audio className="field-pwa-audio-player" controls preload="none" src={activeCaptureAudio.url} aria-label={`Uploaded recording from ${recording.outletName}`}/>}
+              <div id={`recording-transcript-${recording.id}`} className="field-pwa-transcript-slot" hidden={selectedCaptureTranscriptId !== recording.id}>{renderCaptureTranscript(recording.id)}</div>
             </article>;
           })}
         </div>
