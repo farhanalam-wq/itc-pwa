@@ -201,7 +201,7 @@ export class MongoRecordingRepository implements RecordingRepository {
       not_started: [],
       transcribing: ['not_started', 'error'],
       analyzing: ['transcribing'],
-      ready: ['analyzing'],
+      ready: ['analyzing', 'transcribing'],
       error: ['transcribing', 'analyzing']
     };
     const result = await this.recordings.updateOne(

@@ -1,6 +1,7 @@
 export type SyncState = 'queued' | 'uploading' | 'uploaded' | 'error';
 export type StorageDriver = 'local' | 's3';
 export type AnalysisState = 'not_started' | 'transcribing' | 'analyzing' | 'ready' | 'error';
+export type TranscriptionJobState = 'not_started' | 'queued' | 'processing' | 'completed' | 'failed';
 export type VisitOutcome = 'order_placed' | 'follow_up' | 'no_order' | 'new_outlet' | 'not_stated';
 export type Confidence = 'high' | 'medium' | 'low';
 export type SentimentCue = 'positive' | 'neutral' | 'hesitant' | 'at_risk' | 'unknown';
@@ -39,6 +40,23 @@ export interface TranscriptSegment {
   endMs?: number;
   text: string;
   confidence?: number;
+}
+
+/** Plain transcript from audio transcription; timing and speaker data are omitted unless supplied. */
+export interface RecordingTranscript {
+  recordingId: string;
+  state: TranscriptionJobState;
+  provider: 'openai';
+  model: string;
+  transcriptText?: string;
+  languageCodes?: string[];
+  attempts: number;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  errorCode?: string;
+  errorMessage?: string;
+  retryable?: boolean;
 }
 
 export interface InsightEvidence {

@@ -1,5 +1,5 @@
 import { Elysia, t } from 'elysia';
-import type { AnalysisState, ManualTranscriptAnalysis, RecordingMetadata, SyncState } from '@itc/domain';
+import type { AnalysisState, ManualTranscriptAnalysis, RecordingMetadata, RecordingTranscript, SyncState } from '@itc/domain';
 import {
   ADMIN_SESSION_MAX_AGE_SECONDS,
   isAllowedManagerOrigin,
@@ -19,6 +19,9 @@ import { analyzeManualTranscript } from './services/manual-transcript-analysis';
 import { LocalRecordingStorage, RECORDING_UPLOAD_CHUNK_BYTES, UploadStagingError } from './services/local-recording-storage';
 import { createRecordingStorage, type RecordingObjectStorage } from './services/storage/recording-storage';
 import { readStorageConfig } from './services/storage/config';
+import type { TranscriptionJobRepository } from './repositories/mongo-transcription-repository';
+import type { OpenAITranscriptionWorker } from './services/openai-transcription-worker';
+import { OPENAI_TRANSCRIPTION_MODEL, readOpenAITranscriptionConfig } from './services/openai-transcription';
 import {
   S3RecordingUploads
 } from './services/s3-recording-uploads';
@@ -104,6 +107,25 @@ const analysisStatusSchema = t.Object({
   id: t.String(),
   syncState: syncStateSchema,
   analysisState: analysisStateSchema
+});
+
+const recordingTranscriptSchema = t.Object({
+  recordingId: t.String(),
+  state: t.Union([
+    t.Literal('not_started'), t.Literal('queued'), t.Literal('processing'),
+    t.Literal('completed'), t.Literal('failed')
+  ]),
+  provider: t.Literal('openai'),
+  model: t.String(),
+  transcriptText: t.Optional(t.String()),
+  languageCodes: t.Optional(t.Array(t.String())),
+  attempts: t.Number(),
+  createdAt: t.String({ format: 'date-time' }),
+  updatedAt: t.String({ format: 'date-time' }),
+  completedAt: t.Optional(t.String({ format: 'date-time' })),
+  errorCode: t.Optional(t.String()),
+  errorMessage: t.Optional(t.String()),
+  retryable: t.Optional(t.Boolean())
 });
 
 const createVisitBody = t.Object({
@@ -254,7 +276,7 @@ const adminLoginBody = t.Object({
 export interface ApiRuntimeInfo {
   persistence: 'in-memory-demo' | 'mongodb';
   uploads: 'configured' | 'not-configured';
-  analysis: 'not-configured';
+  analysis: 'configured' | 'not-configured';
   storageDriver: 'local' | 's3';
 }
 
@@ -268,7 +290,9 @@ export function createApp(
   transcripts: ManualTranscriptRepository = new InMemoryManualTranscriptRepository(),
   localStorage: LocalRecordingStorage = new LocalRecordingStorage(Bun.env.LOCAL_UPLOAD_STAGING_DIR ?? './var/upload-staging'),
   recordingStorage: RecordingObjectStorage = createRecordingStorage(readStorageConfig()),
-  adminAuth?: AdminAuthService
+  adminAuth?: AdminAuthService,
+  transcriptionWorker?: OpenAITranscriptionWorker,
+  transcriptionJobs?: TranscriptionJobRepository
 ) {
   const managerOrigin = readManagerOrigin();
   const sessionCookieSchema = t.Object({
@@ -286,6 +310,34 @@ export function createApp(
   };
   const unauthorizedAdmin = { code: 'admin_auth_required', message: 'Sign in with the administrator account to continue.' };
   const unavailableAuth = { code: 'admin_auth_unavailable', message: 'Administrator authentication is not configured on this API.' };
+  const scheduleTranscription = async (recordingId: string): Promise<void> => {
+    if (!transcriptionWorker || !transcriptionJobs) return;
+    try {
+      const job = await transcriptionWorker.enqueue(recordingId);
+      if (job.state === 'queued') {
+        void transcriptionWorker.runNext(recordingId).catch((error: unknown) => {
+          console.error(`Transcription worker failed for recording ${recordingId}:`, error);
+        });
+      }
+    } catch (error) {
+      // A transcription queue outage must not undo confirmation of durable audio storage.
+      console.error(`Could not queue transcription for recording ${recordingId}:`, error);
+    }
+  };
+  const transcriptFor = async (recordingId: string, recording: RecordingMetadata): Promise<RecordingTranscript> => {
+    const job = await transcriptionJobs?.get(recordingId);
+    if (job) return job;
+    const createdAt = new Date(recording.startedAt).toISOString();
+    return {
+      recordingId,
+      state: 'not_started',
+      provider: 'openai',
+      model: OPENAI_TRANSCRIPTION_MODEL,
+      attempts: 0,
+      createdAt,
+      updatedAt: createdAt
+    };
+  };
 
   return new Elysia()
     .get('/health', () => ({
@@ -294,7 +346,7 @@ export function createApp(
       runtime: {
         persistence: repository instanceof DemoRecordingRepository ? 'in-memory-demo' as const : 'mongodb' as const,
         uploads: uploads.configured ? 'configured' as const : 'not-configured' as const,
-        analysis: 'not-configured' as const,
+        analysis: readOpenAITranscriptionConfig().configured ? 'configured' as const : 'not-configured' as const,
         storageDriver: recordingStorage.driver
       } satisfies ApiRuntimeInfo
     }))
@@ -598,7 +650,10 @@ export function createApp(
       let recording = await repository.getRecording(params.recordingId);
       if (!recording) return status(404, { code: 'recording_not_found', message: 'Recording metadata was not found.' });
       try {
-        if (recording.syncState === 'uploaded') return recording;
+        if (recording.syncState === 'uploaded') {
+          await scheduleTranscription(recording.id);
+          return recording;
+        }
         const bytes = await localStorage.assemble({
           id: recording.id,
           startedAt: recording.startedAt,
@@ -631,6 +686,7 @@ export function createApp(
           return status(503, { code: 'recording_finalize_pending', message: 'The audio is stored, but the API has not confirmed completion yet. Retry sync from the device.' });
         }
         await localStorage.removeStaged(recording.id, recording.startedAt, recording.mimeType).catch(() => undefined);
+        await scheduleTranscription(recording.id);
         return recording;
       } catch (error) {
         if (error instanceof UploadStagingError) {
@@ -721,6 +777,55 @@ export function createApp(
         });
       }
       return analysis;
+    })
+    .get('/v1/recordings/:recordingId/transcript', {
+      params: recordingParams,
+      response: {
+        200: recordingTranscriptSchema,
+        401: errorSchema,
+        404: errorSchema,
+        409: errorSchema,
+        503: errorSchema
+      }
+    }, async ({ params, request, status }) => {
+      if (!adminAuth) return status(503, unavailableAuth);
+      if (!await hasAdminSession(request)) return status(401, unauthorizedAdmin);
+      if (!transcriptionJobs) return status(503, { code: 'transcription_unavailable', message: 'MongoDB transcription storage is not configured.' });
+      const recording = await repository.getRecording(params.recordingId);
+      if (!recording) return status(404, { code: 'recording_not_found', message: 'The requested recording does not exist.' });
+      if (recording.syncState !== 'uploaded') return status(409, { code: 'recording_not_stored', message: 'Transcription is available after the audio is durably stored.' });
+      try {
+        await scheduleTranscription(recording.id);
+      } catch {
+        // The stored audio remains available; the manager can retry after API configuration is fixed.
+      }
+      return transcriptFor(recording.id, recording);
+    })
+    .post('/v1/recordings/:recordingId/transcript/retry', {
+      params: recordingParams,
+      response: {
+        200: recordingTranscriptSchema,
+        401: errorSchema,
+        404: errorSchema,
+        409: errorSchema,
+        503: errorSchema
+      }
+    }, async ({ params, request, status }) => {
+      if (!adminAuth) return status(503, unavailableAuth);
+      if (!await hasAdminSession(request)) return status(401, unauthorizedAdmin);
+      if (!transcriptionJobs || !transcriptionWorker) return status(503, { code: 'transcription_unavailable', message: 'OpenAI transcription is not configured on the API server.' });
+      const recording = await repository.getRecording(params.recordingId);
+      if (!recording) return status(404, { code: 'recording_not_found', message: 'The requested recording does not exist.' });
+      if (recording.syncState !== 'uploaded') return status(409, { code: 'recording_not_stored', message: 'Transcription can be retried after the audio is durably stored.' });
+      let job = await transcriptionJobs.get(recording.id);
+      if (!job) job = await transcriptionWorker.enqueue(recording.id);
+      else if (job.state === 'failed') job = await transcriptionJobs.retry(recording.id);
+      if (!job) return status(409, { code: 'transcription_not_retryable', message: 'This transcription is not in a retryable state.' });
+      if (job.state !== 'queued') return status(409, { code: 'transcription_not_retryable', message: 'This transcription is not waiting for a retry.' });
+      void transcriptionWorker.runNext(recording.id).catch((error: unknown) => {
+        console.error(`Transcription retry failed for recording ${recording.id}:`, error);
+      });
+      return job;
     })
     .get('/v1/recordings/:recordingId', {
       params: recordingParams,

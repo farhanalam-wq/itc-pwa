@@ -96,7 +96,7 @@ const allowedSyncTransitions: Record<SyncState, readonly SyncState[]> = {
 
 const allowedAnalysisTransitions: Record<AnalysisState, readonly AnalysisState[]> = {
   not_started: ['transcribing'],
-  transcribing: ['analyzing', 'error'],
+  transcribing: ['analyzing', 'ready', 'error'],
   analyzing: ['ready', 'error'],
   ready: [],
   error: ['transcribing']

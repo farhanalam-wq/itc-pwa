@@ -1,6 +1,7 @@
 import type { ApiError, HealthResponse } from '@itc/contracts';
-import type { AnalysisState, ManualTranscriptAnalysis, RecordingMetadata, SyncState } from '@itc/domain';
+import type { AnalysisState, ManualTranscriptAnalysis, RecordingMetadata, RecordingTranscript, SyncState } from '@itc/domain';
 export type { ManualTranscriptAnalysis } from '@itc/domain';
+export type { RecordingTranscript } from '@itc/domain';
 
 export interface ApiClientOptions {
   baseUrl: string;
@@ -14,7 +15,7 @@ const DEFAULT_API_REQUEST_TIMEOUT_MS = 25_000;
 export interface ApiRuntimeHealth {
   persistence: 'in-memory-demo' | 'mongodb';
   uploads: 'configured' | 'not-configured';
-  analysis: 'not-configured';
+  analysis: 'configured' | 'not-configured';
   storageDriver: 'local' | 's3';
 }
 
@@ -131,6 +132,8 @@ export interface ApiClient {
   getVisit(visitId: string): Promise<VisitRecord>;
   createVisitRecording(visitId: string, input: CreateRecordingRequest): Promise<RecordingMetadata>;
   getRecording(recordingId: string): Promise<RecordingMetadata>;
+  getRecordingTranscript(recordingId: string): Promise<RecordingTranscript>;
+  retryRecordingTranscription(recordingId: string): Promise<RecordingTranscript>;
   getRecordingSyncStatus(recordingId: string): Promise<RecordingSyncStatus>;
   listRecordings(query?: ListRecordingsQuery): Promise<RecordingPage>;
   getRecordingDownloadUrl(recordingId: string): Promise<SignedRecordingUrl>;
@@ -250,6 +253,13 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
     ),
     getRecording: (recordingId) => request<RecordingMetadata>(
       '/v1/recordings/' + encodeURIComponent(recordingId)
+    ),
+    getRecordingTranscript: (recordingId) => request<RecordingTranscript>(
+      '/v1/recordings/' + encodeURIComponent(recordingId) + '/transcript'
+    ),
+    retryRecordingTranscription: (recordingId) => request<RecordingTranscript>(
+      '/v1/recordings/' + encodeURIComponent(recordingId) + '/transcript/retry',
+      { method: 'POST' }
     ),
     getRecordingSyncStatus: (recordingId) => request<RecordingSyncStatus>(
       '/v1/recordings/' + encodeURIComponent(recordingId) + '/sync'

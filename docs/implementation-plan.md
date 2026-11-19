@@ -493,9 +493,18 @@ This log tracks the revised vertical slice above. Each phase is committed before
 | 0 — Repository recovery | Complete | `f4eaa58 chore: ignore local recording artifacts` | Removed captured WebM files from Git tracking while preserving local files; ignored API upload/runtime directories. |
 | 1 — MongoDB and storage adapters | Complete | `ddd1651 feat: persist recordings with configurable storage` | Added Mongo metadata repository, validated local/S3 storage selection, private local playback and single finalized object handling. |
 | 2 — OPFS sync reliability | Complete | `d8bef04 fix: resume recording sync to configured storage` | Added manifest-backed resumable chunk transport, digest/size checks and server durability confirmation before PWA completion. |
-| 3 — Single administrator | In review | — | Mongo-backed one-time bootstrap, password login, opaque expiring sessions, manager-route protection, and manager setup/sign-in UI. |
-| 4 — OpenAI transcription | Not started | — | Transcribe only completed stored audio, persist lifecycle/transcript, and report provider failures honestly. |
+| 3 — Single administrator | Complete | `b8d80ab feat: add single-admin account setup` | Mongo-backed one-time bootstrap, password login, opaque expiring sessions, manager-route protection, and manager setup/sign-in UI. |
+| 4 — OpenAI transcription | Complete | `feat: transcribe stored recordings with OpenAI` | `gpt-transcribe` provider; durable Mongo job state with leases/retry; automatically queue after final audio storage; authenticated transcript/retry API; setup notes in `docs/openai-transcription-setup.md`. |
 | 5 — Manager transcript display | Not started | — | Show real recording transcript text and lifecycle distinctly from synthetic report fixtures. |
 | 6 — Workflow handoff | Not started | — | Update setup/runbook and verify the end-to-end workflow supported by configured services. |
 
 OpenAI is the selected transcription provider for this increment. The API key is server-only (`OPENAI_API_KEY`). The manager remains a single-admin workspace; there is no tenant model or automated insight extraction in this scope.
+
+### Phase 4 implementation notes
+
+- The final audio object is read from the selected local or S3 adapter only after upload confirmation. The API submits one merged recording, not the transport chunks.
+- MongoDB `transcription_jobs` stores provider/model, state, attempt count, transcript text, detected languages, timestamps and sanitized error/retry information. A ten-minute processing lease permits restart recovery; startup and a one-minute queue poll resume eligible jobs.
+- Transcript route: `GET /v1/recordings/:recordingId/transcript`; manual retry route: `POST /v1/recordings/:recordingId/transcript/retry`. Both require the single administrator session.
+- The provider returns plain text and language codes only when supplied. No speaker labels, timestamps, or confidence are synthesized. Audio stays in the configured object store; transcripts stay in MongoDB.
+- Files above 25 MiB remain stored but fail transcription with an actionable state; audio splitting/compression remains out of scope until an accurate context-preserving policy is selected.
+- Validation completed: workspace typecheck/build, API typecheck/build, fake-provider durable-worker smoke, authenticated transcript-route smoke, and `git diff --check`. No live MongoDB, AWS, or OpenAI credentials are configured in this workspace, so external-service calls remain unverified.
