@@ -12,7 +12,7 @@ import {
   type StorageSnapshot
 } from './storage';
 import { startMetadataRegistrationSync, type MetadataRegistrationSyncController } from './sync/metadata-registration';
-import { uploadPendingAudio } from './sync/audio-upload';
+import { uploadPendingAudio, type ChunkUploadProgress } from './sync/audio-upload';
 import './styles.css';
 
 type Screen = 'capture' | 'history';
@@ -171,6 +171,7 @@ function FieldApp() {
   const [isPersistent, setIsPersistent] = useState(false);
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [chunkQueue, setChunkQueue] = useState<ChunkUploadProgress[]>([]);
   const writerRef = useRef<RecordingWriter | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -276,7 +277,7 @@ function FieldApp() {
     }).catch((error) => setStorageError(error instanceof Error ? error.message : 'Interrupted recordings could not be checked.'));
 
     const sync = startMetadataRegistrationSync(apiClient, async () => {
-      await uploadPendingAudio(apiClient);
+      await uploadPendingAudio(apiClient, (progress) => setChunkQueue((current) => [progress, ...current.filter((item) => item.recordingId !== progress.recordingId)].slice(0, 4)));
       await refreshLocalState();
     });
     syncRef.current = sync;
@@ -614,6 +615,16 @@ function FieldApp() {
       </section>}
     </main>
 
+    {chunkQueue.length > 0 && <section className="chunk-upload-queue" aria-label="Audio upload chunks" aria-live="polite">
+      <div className="chunk-queue-heading"><strong>Uploading audio chunks</strong><span>{chunkQueue.some((item) => item.state === 'uploading') ? 'Local server sync' : 'Recent transfers'}</span></div>
+      {chunkQueue.map((item) => <div className="chunk-queue-row" key={item.recordingId}>
+        <span className="chunk-queue-name">{item.outletName}</span>
+        <div className="chunk-queue-segments" aria-label={`${item.completedChunks} of ${item.totalChunks} chunks uploaded`}>
+          {Array.from({ length: item.totalChunks }, (_, index) => <i key={index} className={index < item.completedChunks ? 'sent' : item.state === 'error' && index === item.completedChunks ? 'failed' : ''}/>) }
+        </div>
+        <span className="chunk-queue-count">{item.state === 'complete' ? 'Saved' : item.state === 'error' ? 'Retry' : `${item.completedChunks}/${item.totalChunks}`}</span>
+      </div>)}
+    </section>}
     <nav className="bottom-nav" aria-label="Primary navigation">
       <button type="button" className={screen === 'capture' ? 'active' : ''} aria-current={screen === 'capture' ? 'page' : undefined} onClick={() => setScreen('capture')}><Icon name="record"/>Record</button>
       <button type="button" className={screen === 'history' ? 'active' : ''} aria-current={screen === 'history' ? 'page' : undefined} onClick={() => setScreen('history')}><Icon name="history"/>History</button>

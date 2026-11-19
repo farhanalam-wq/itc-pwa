@@ -171,6 +171,16 @@ input { caret-color: var(--green); }
 .bottom-nav button.active { color: var(--green); font-weight: 750; }
 .bottom-nav button.active::after { width: 18px; height: 2px; content: ''; border-radius: 2px; background: currentColor; }
 .truth-footer { width: min(520px, 100%); margin: -15px auto 0; padding: 0 20px 12px; display: flex; justify-content: space-between; gap: 8px; color: #738077; font-size: 8px; }
+.chunk-upload-queue { position: sticky; bottom: calc(62px + env(safe-area-inset-bottom)); z-index: 4; margin: 0 12px 8px; padding: 10px 12px; border: 1px solid #cdd9ca; border-radius: 10px; color: #26372b; background: #f7f9f4; }
+.chunk-queue-heading { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 7px; font-size: 10px; }
+.chunk-queue-heading span { color: #617167; font-size: 9px; }
+.chunk-queue-row { display: grid; grid-template-columns: minmax(80px, 1fr) minmax(80px, 1.5fr) 34px; align-items: center; gap: 8px; min-height: 22px; }
+.chunk-queue-name { overflow: hidden; color: #4c5c51; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.chunk-queue-segments { display: flex; gap: 2px; }
+.chunk-queue-segments i { height: 5px; flex: 1; border-radius: 3px; background: #dce4d9; }
+.chunk-queue-segments i.sent { background: #36805b; }
+.chunk-queue-segments i.failed { background: #b55b3b; }
+.chunk-queue-count { color: #52645a; font-size: 9px; font-variant-numeric: tabular-nums; text-align: right; }
 
 @keyframes recorder-arrive { from { opacity: .86; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes live-dot { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }

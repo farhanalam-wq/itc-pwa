@@ -1,5 +1,143 @@
 # Implementation plan
 
+## Current baseline and approved next scope — 2026-11-19
+
+This section records the actual repository state and narrows the next implementation increment. It supersedes the broader proposed insight-extraction work in Phases 5–6 for the immediate deliverable: preserve the current PWA and manager experience, add durable storage and one administrator, transcribe completed recordings, and show those transcripts in the manager. Do not add automated sales insight extraction, new reporting metrics, tenant isolation, or extra account roles in this increment.
+
+### Desired vertical slice
+
+1. A field representative records one conversation. Recording works without connectivity and the completed, merged audio file is saved to OPFS with its recording metadata in IndexedDB.
+2. Reconnect resumes the queued upload. Transport may retry in pieces, but storage contains exactly one finalized conversation audio object, not a collection of user-visible recordings or separate clip objects.
+3. The API selects a server-side storage adapter from `STORAGE_DRIVER=local|s3`. `local` writes the one final file to a configured persistent directory on the API machine/VM. `s3` writes the same logical recording as one final S3 object under the configured prefix. Credentials never reach the PWA.
+4. After confirmed storage, MongoDB stores the recording metadata and storage reference. Store a bucket/key (or local relative key), never a long-lived or expiring presigned URL. Generate short-lived playback URLs when requested.
+5. A transcription job consumes that completed recording through a provider adapter. Persist job state, transcript text/segments, language and timestamps/confidence when supplied, provider reference, and error/retry information in MongoDB.
+6. The manager shows real recordings and their transcription state/transcript. Seeded synthetic reports remain clearly marked as synthetic and cannot masquerade as the transcript of a newly captured recording.
+7. The manager has a one-time/bootstrap path to create the single administrator account. There is no public multi-user signup, tenant model, or tenant-specific storage configuration in this phase.
+
+```mermaid
+flowchart LR
+  PWA[Field PWA] -->|record offline| OPFS[OPFS final audio + IndexedDB queue]
+  OPFS -->|online retry: one finalized conversation| API[Elysia API]
+  API --> DRIVER{STORAGE_DRIVER}
+  DRIVER -->|local| DISK[Persistent VM folder]
+  DRIVER -->|s3| S3[One S3 object]
+  API --> META[MongoDB recording/job/transcript metadata]
+  DISK --> JOB[Transcription adapter/job]
+  S3 --> JOB
+  JOB --> META
+  META --> ADMIN[Single-admin manager: recording + transcript]
+```
+
+### What is already implemented
+
+| Area | Present implementation | Boundary / limitation |
+| --- | --- | --- |
+| Workspace | Bun workspaces, Turborepo, typed React/Vite apps and shared domain/contracts/client/charts/demo-data packages; Hanken Grotesk bundled. | Elysia is pinned to `2.0.0-rc.3`; retain the lock and follow the repository Elysia instructions for API changes. |
+| Field PWA | Record/pause/resume/stop/history; `MediaRecorder` output is finalized into a single local audio file. OPFS stores audio; IndexedDB stores metadata, retry and sync state. Offline capture/queue and online metadata registration exist. | Current working-tree chunk transfer is an API transport detail. It must assemble to and retain one final recording object. Resume/idempotency and API restart behavior still need end-to-end verification. |
+| Current local upload experiment | Uncommitted API route accepts indexed chunks; `LocalRecordingStorage` writes chunks under `apps/api/uploads/recordings/...`, assembles the final file on the last chunk, and has a finalize endpoint. PWA client uses the chunk route and displays per-chunk progress. | This is not yet a completed storage abstraction. It currently routes to local disk unconditionally, is not durable metadata, and does not honor `STORAGE_DRIVER`. Its status integration needs review against the S3 lifecycle before being accepted. |
+| S3 | Committed `S3RecordingUploads` supports presigned audio PUT/completion verification and transcript text writes. S3 prefixes/config examples and setup documentation exist. | No successful live AWS write has been verified. Region/bucket are not credentials. Current dirty local-upload route bypasses the committed S3 route; reconcile rather than leave two competing upload protocols. |
+| Manager | Overview and Conversation Insights are distinct; filters, ApexCharts, evidence drill-down, capture history, transcript detail, manual text import, and synthetic seed reports exist. | The report charts are still synthetic/demo aggregates. They must remain labeled as such; the immediate addition is a real recording/transcript surface, not a replacement analytics engine. |
+| Manual transcript analysis | API accepts consented text and deterministic rules produce a typed evidence-linked report; optional VTT/SRT timings and conversation date are supported. | This is not audio transcription. The rule analyzer must not be presented as an ASR result or used to fabricate a transcript for PWA audio. |
+| API persistence | Elysia has visit/recording routes and in-memory recording/manual-transcript repositories. | Restart loses metadata, jobs and imported reports. MongoDB repositories/migrations/indexes are not present. |
+| Authentication | No administrator account creation/login/session implementation is present. | The `AS` avatar and admin shell are demo UI only; there is no authenticated account behind them. |
+| Transcription | Domain state labels include `not_started`, `transcribing`, `analyzing`, `ready`, `error`; manager can display capture analysis state. | No transcription provider, background worker, audio-to-text route, persisted transcript job, or live transcript display from a PWA recording is connected. |
+
+### Repository inventory at planning time
+
+The following is the exact Git working-tree inventory at the time this addendum was written. Do not discard these uncommitted changes while implementing the plan.
+
+**Modified tracked files (uncommitted):**
+
+- `apps/api/src/app.ts` — adds local chunk receive/finalize routes and injects local storage; check health/storage semantics and state transitions.
+- `apps/field-pwa/src/main.tsx`, `apps/field-pwa/src/styles.css` — chunk-progress queue UI and upload progress wiring.
+- `apps/field-pwa/src/sync/audio-upload.ts` — uses client chunk upload rather than direct presigned S3 PUT.
+- `packages/api-client/src/index.ts` — chunk upload route/client callback.
+- `docs/implementation-plan.md` — this current-state inventory and narrowed S3/MongoDB/transcription plan.
+
+**Untracked source:**
+
+- `apps/api/src/services/local-recording-storage.ts` — local date-partitioned audio storage and chunk assembly.
+
+**Untracked generated audio artifacts:**
+
+- `apps/api/uploads/recordings/2026/11/18/1b40873f-7381-42ae-b580-2978d9a77cde.webm` (124,887 bytes)
+- `apps/api/uploads/recordings/2026/11/18/4efd0d82-c9b0-4a74-944a-18f1a6d9a2c7.webm` (76,225 bytes)
+- `apps/api/uploads/recordings/2026/11/18/4ca2e8dd-69d0-4d5a-87f0-c9f2973e407d.webm` (48,200 bytes)
+
+These are audio files, not source code. Treat them as potentially real user recordings: do not inspect, attach, stage, commit, or delete them as part of implementation without explicit direction. Add the upload directory to `.gitignore` before future local capture artifacts can be staged accidentally.
+
+**Committed code surface (high-level):**
+
+- `apps/field-pwa/src/{main.tsx,styles.css,storage/**,sync/**,pwa/**}`: recording UI, OPFS/IndexedDB, metadata and audio sync.
+- `apps/api/src/{app.ts,index.ts,repositories/**,services/**}`: Elysia API, in-memory repositories, S3 adapter, deterministic manual-transcript analyzer.
+- `apps/manager/src/**`: overview, insights, chart/report UI, capture history and transcript import/detail.
+- `packages/{domain,contracts,api-client,demo-data,charts,ui}/**`: shared types, client, synthetic data and UI/chart packages.
+- `apps/api/.env.example`, `docs/s3-upload-setup.md`, `PRODUCT.md`, `DESIGN.md`, `docs/subagent-strategy.md`, and this plan document: environment/setup, product/design context and planned delivery.
+
+At the committed baseline, HEAD is `eedb029 feat: add manual transcript insights and S3 storage`; the preceding commits are `5402d0c feat: upload field recordings to S3`, `ce65e4c fix: align local demo service ports`, `1988722 feat: build field capture and reporting demo`, and `62b75a2 docs: define sub-agent delivery strategy`. The workspace was dirty at plan time; the changes listed above are not included in HEAD.
+
+### Revised phase plan
+
+| Phase | Deliverable | Owned scope / acceptance gate |
+| --- | --- | --- |
+| A — Contract and recovery baseline | Freeze one recording lifecycle: OPFS queued → uploading → stored → transcribing → transcript ready/error. Define stable IDs, idempotency, storage reference, transcript fields, and API response schemas. Decide whether existing chunk requests remain transport-only; final local/S3 storage must be one merged audio object. Protect untracked audio artifacts and ignore the upload directory. | Lead owns `packages/domain`, `packages/contracts`, endpoint/state decisions and Git inventory. No parallel implementation until contracts are agreed. |
+| B — MongoDB and storage adapters | Add MongoDB connection/config, indexes and repositories for the one admin, recording metadata, transcription job, transcript, and global storage settings. Add a `RecordingStorage` interface with `local` and `s3` adapters selected by validated `STORAGE_DRIVER`. Local paths must be rooted under `LOCAL_RECORDING_DIR`, non-public, date/id partitioned, and persistent in deployments. S3 uses server-issued authorization or API proxy upload and stores one object per finalized conversation. | API/platform owner. Acceptance: switching only the storage enum changes the backend adapter; invalid values fail startup; Mongo stores references/metadata rather than audio bytes or presigned URLs; one final audio object is recoverable after API restart. |
+| C — PWA upload reconciliation | Keep OPFS/IndexedDB as the offline source of truth. On reconnect, upload only finalized merged audio, with stable idempotency and resume/retry semantics. Preserve per-chunk progress only as transport telemetry; never create multiple final recordings. Mark remote completion only after API confirms durable write and Mongo metadata. | Field PWA owner, coordinated with Phase B API contracts. Acceptance: airplane-mode capture survives reload; reconnect produces one final local file or one S3 object and one Mongo recording document; failure leaves OPFS copy queued and visibly retryable. |
+| D — Single-admin setup | Add one-time administrator bootstrap/account creation in the manager/API, password hashing, authenticated session, protected manager/API routes, logout, and setup-disabled behavior once the first admin exists. No tenant collection, tenant IDs, multi-user/team roles, or tenant-scoped storage config. Storage mode is one server-level environment setting. | API auth owner plus manager owner after session contract approval. Acceptance: first-run creates the one admin; repeat/public creation is refused; unauthenticated users cannot access admin data; no secrets are shipped to Vite. |
+| E — Audio transcription | Choose and verify an approved ASR provider, supported region/languages, account permissions, consent/data residency, cost and retry behavior. Implement provider interface and asynchronous job triggered only after storage confirmation. Persist job state and provider transcript in Mongo. In local mode, provider worker reads the local final file; in S3 mode, it reads that single S3 object. Provide a deterministic fake provider only for tests/demo fallback and label it clearly. | Transcription owner after Phase A schema and Phase B storage completion. Acceptance: a real PWA recording transitions to transcribing and then ready/error; transcript includes segment text and timestamps/speakers/confidence only where provider supplies them; retries are idempotent. |
+| F — Manager transcript experience | Add a real recordings/transcripts view or extend current visit detail: capture metadata, storage/sync state, transcription state, transcript text/segments, timestamps/speaker labels and retry/error status. Preserve existing dashboards and synthetic fixture indicators. Show live transcripts as live, never splice synthetic insight quotes into them. Keep manual transcript import separate and labeled. | Manager owner consumes the stable API only. Acceptance: a newly recorded conversation appears in the manager with its own transcript after transcription; loading/empty/error states work; synthetic demo charts remain explicitly synthetic. |
+| G — Integrated demo verification and handoff | Exercise PWA → OPFS offline → reconnect → selected storage adapter → Mongo document → transcription job → persisted transcript → manager detail. Test local mode and S3 mode separately, API restart recovery, duplicate/retry behavior, invalid storage env, provider failure, and synthetic/live labeling. Document required env and commands. | Lead integrates, runs the user-requested verification, reconciles all evidence, and writes one conventional integration commit after approval. |
+
+### Configuration contract to implement
+
+Required global API settings:
+
+```dotenv
+STORAGE_DRIVER=local # exactly local or s3
+LOCAL_RECORDING_DIR=./var/recordings
+MONGODB_URI=mongodb://127.0.0.1:27017
+MONGODB_DATABASE=itc_field_source
+```
+
+S3 mode additionally requires `AWS_REGION`, `S3_BUCKET_NAME`, and recording prefix settings; the API obtains credentials from its runtime role/profile/credential chain. Do not put AWS credentials in PWA or manager environment variables. The `.env.example` should document mutually exclusive storage modes and startup validation. The one-time admin bootstrap secret/account setup requirements must be documented without committing a password or real secret.
+
+MongoDB should store a recording document with stable recording/visit IDs, consent timestamp, representative/outlet/territory metadata, byte length, duration, MIME type, checksum, storage driver, object key or local relative path, sync/analysis state, and timestamps. Transcript/job data should be separate or cleanly nested with provider job ID, transcript segments, language, completion/error state and provenance. Add unique indexes for stable IDs/idempotency and query indexes for history/status. Signed S3 URLs are minted on demand and not persisted as permanent links.
+
+### Agent strategy for the approved implementation
+
+Use the existing strategy in `docs/subagent-strategy.md`, adjusted to this narrower scope. The lead freezes contracts first and integrates; then use at most three sub-agents concurrently with non-overlapping path ownership:
+
+| Agent | Assignment after Phase A | Owned paths | Must not do |
+| --- | --- | --- | --- |
+| API persistence/storage | Mongo connection, repository interfaces/adapters, storage enum validation, local/S3 final-object implementations, upload completion and API persistence. | `apps/api/src/repositories/**`, new storage/database service modules; request shared route/type changes from lead. | Edit PWA upload logic or manager screens; create tenancy; persist expiring S3 URLs. |
+| Field PWA | OPFS queue lifecycle, single-file upload/retry/resume, network state, chunk progress UI and API client integration. | `apps/field-pwa/**`; propose API client changes instead of independently changing shared contracts. | Store each transport chunk as a separate final conversation object or mark uploaded before server confirmation. |
+| Transcription + manager | Provider adapter/job lifecycle on API-owned transcription files, then manager transcript presentation in a later wave with separate ownership. | Wave 1: new API transcription service/provider files. Wave 2: `apps/manager/**` transcript view after API shape freezes. | Edit `apps/api/src/app.ts` concurrently with API owner; alter existing report semantics or synthetic labels. |
+| Lead / integration | Contract/schema, Elysia route wiring, env/docs, single-admin design and integration, exact scope decisions, final runbook and commit. | `packages/domain/**`, `packages/contracts/**`, shared route wiring, root/env/docs; coordinate handoffs for contested files. | Let shared contract ownership drift or start dependent UI before API shapes are agreed. |
+
+Recommended waves: (1) lead contract/spec and storage mode decision; (2) API/Mongo-storage and PWA upload work in parallel against that contract; (3) transcription provider adapter after completed-object contract is stable; (4) manager auth/session and transcript display against persisted API response; (5) lead end-to-end integration, local/S3 mode verification, and commit. Keep `bun.lock`, `apps/api/src/app.ts`, shared types, and auth/session contracts single-owner at a time.
+
+### Proposed acceptance checklist
+
+- `STORAGE_DRIVER=local` and `STORAGE_DRIVER=s3` are the only accepted values and startup/config diagnostics identify the chosen driver without exposing credentials.
+- Each finalized visit audio results in exactly one merged recording file/object. Chunk retries do not multiply final artifacts or Mongo documents.
+- Offline recordings persist in OPFS across reload; reconnect sync is resumable and confirms server durability before local state becomes uploaded.
+- MongoDB persists the one admin, recording/storage reference, transcription job and transcript across API restarts.
+- A PWA recording is transcribed by the selected provider and the transcript is visible in the manager with honest pending/failed/ready states.
+- Existing synthetic reports remain labeled and unchanged in meaning; newly captured audio never receives a synthetic transcript or insights.
+- No multi-tenant behavior is introduced. There is one administrator and one global storage driver for this deployment.
+- Local storage files and captured audio artifacts are excluded from Git; no credentials, transcript/audio payloads, or user media are committed.
+- Verify typecheck/build plus a local-mode and S3-mode end-to-end recording path, Mongo persistence after restart, transcription success/failure, and single-object/idempotency behavior.
+
+### Proposed commit subject
+
+After implementation and verification, suggested cohesive commit:
+
+```text
+feat: persist recordings and display live transcripts
+```
+
+Do not create this commit until the user approves the plan, the implementation is complete, and the current uncommitted audio artifacts have been excluded from staging.
+
 ## 1. Outcome and product boundary
 
 Build a demo-ready, typed monorepo with two connected product surfaces: an offline-capable field recording PWA and a managerial conversation reporting dashboard. The core proof is that a field conversation can be preserved through loss of connectivity, synchronized safely, transcribed, converted into structured, evidence-backed signals, and reviewed by a manager.

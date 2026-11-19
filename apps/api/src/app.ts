@@ -9,6 +9,7 @@ import {
   type ManualTranscriptRepository
 } from './repositories/manual-transcript-repository';
 import { analyzeManualTranscript } from './services/manual-transcript-analysis';
+import { LocalRecordingStorage } from './services/local-recording-storage';
 import {
   S3RecordingUploads,
   UploadedObjectValidationError
@@ -88,6 +89,7 @@ const createRecordingBody = t.Object({
 });
 
 const recordingParams = t.Object({ recordingId: t.String({ minLength: 1, maxLength: 128 }) });
+const recordingChunkParams = t.Object({ recordingId: t.String({ minLength: 1, maxLength: 128 }), chunkIndex: t.Numeric({ minimum: 0 }), chunkCount: t.Numeric({ minimum: 1 }) });
 const visitParams = t.Object({ visitId: t.String({ minLength: 1, maxLength: 128 }) });
 
 const recordingQuery = t.Object({
@@ -217,7 +219,8 @@ export interface ApiRuntimeInfo {
 export function createApp(
   repository: RecordingRepository = new DemoRecordingRepository(),
   uploads: S3RecordingUploads = new S3RecordingUploads(),
-  transcripts: ManualTranscriptRepository = new InMemoryManualTranscriptRepository()
+  transcripts: ManualTranscriptRepository = new InMemoryManualTranscriptRepository(),
+  localStorage: LocalRecordingStorage = new LocalRecordingStorage()
 ) {
   return new Elysia()
     .get('/health', () => ({
@@ -225,7 +228,7 @@ export function createApp(
       service: 'itc-field-source-api',
       runtime: {
         persistence: 'in-memory-demo' as const,
-        uploads: uploads.configured ? 'configured' as const : 'not-configured' as const,
+        uploads: 'configured' as const,
         analysis: 'not-configured' as const
       } satisfies ApiRuntimeInfo
     }))
@@ -391,6 +394,38 @@ export function createApp(
         limit: query.limit ?? 25,
         offset: query.offset ?? 0
       });
+    })
+    .put('/v1/recordings/:recordingId/audio/:chunkIndex/:chunkCount', {
+      params: recordingChunkParams,
+      response: { 200: t.Object({ received: t.Boolean() }), 404: errorSchema, 409: errorSchema, 500: errorSchema }
+    }, async ({ params, request, status }) => {
+      const recording = repository.getRecording(params.recordingId);
+      if (!recording) return status(404, { code: 'recording_not_found', message: 'Register visit details before uploading audio.' });
+      const bytes = new Uint8Array(await request.arrayBuffer());
+      if (params.chunkIndex >= params.chunkCount || bytes.byteLength > 1024 * 1024) return status(409, { code: 'invalid_audio_chunk', message: 'The audio chunk is invalid.' });
+      try {
+        await localStorage.saveChunk({ id: recording.id, startedAt: recording.startedAt, mimeType: recording.mimeType, index: params.chunkIndex, total: params.chunkCount, bytes });
+        return { received: true };
+      } catch {
+        return status(500, { code: 'local_audio_store_failed', message: 'The API could not save audio in its local recordings folder.' });
+      }
+    })
+    .post('/v1/recordings/:recordingId/audio/complete', {
+      params: recordingParams,
+      response: { 200: recordingSchema, 404: errorSchema, 409: errorSchema, 500: errorSchema }
+    }, async ({ params, status }) => {
+      const recording = repository.getRecording(params.recordingId);
+      if (!recording) return status(404, { code: 'recording_not_found', message: 'Recording metadata was not found.' });
+      try {
+        const bytes = new Uint8Array(await localStorage.read(recording.id, recording.startedAt, recording.mimeType));
+        if (bytes.byteLength !== recording.byteLength) return status(409, { code: 'audio_size_mismatch', message: 'Uploaded chunks do not match recording size.' });
+        const objectKey = localStorage.keyFor(recording.id, recording.startedAt, recording.mimeType);
+        if (recording.syncState === 'queued') repository.transitionSyncState(recording.id, 'uploading', objectKey);
+        if (repository.getRecording(recording.id)?.syncState === 'uploading') repository.transitionSyncState(recording.id, 'uploaded', objectKey);
+        return repository.getRecording(recording.id)!;
+      } catch {
+        return status(500, { code: 'local_audio_finalize_failed', message: 'The API could not assemble the uploaded audio chunks.' });
+      }
     })
     .post('/v1/recordings/:recordingId/upload-url', {
       params: recordingParams,

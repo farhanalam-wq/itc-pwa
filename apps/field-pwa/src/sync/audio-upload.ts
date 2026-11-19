@@ -12,6 +12,14 @@ export interface AudioUploadBatchResult {
   failures: AudioUploadFailure[];
 }
 
+export interface ChunkUploadProgress {
+  recordingId: string;
+  outletName: string;
+  completedChunks: number;
+  totalChunks: number;
+  state: 'uploading' | 'complete' | 'error';
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'The S3 audio upload failed.';
 }
@@ -27,7 +35,7 @@ function isRetryable(error: unknown): boolean {
 }
 
 /** Upload finalized, consented OPFS files after their visit metadata is linked. */
-export async function uploadPendingAudio(client: ApiClient): Promise<AudioUploadBatchResult> {
+export async function uploadPendingAudio(client: ApiClient, onProgress?: (progress: ChunkUploadProgress) => void): Promise<AudioUploadBatchResult> {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
     return { attempted: 0, uploaded: 0, failures: [] };
   }
@@ -35,13 +43,6 @@ export async function uploadPendingAudio(client: ApiClient): Promise<AudioUpload
   const pending = (await recordingStore.listUploadQueue())
     .filter((recording) => recording.metadataRegistrationState === 'registered');
   if (!pending.length) return { attempted: 0, uploaded: 0, failures: [] };
-  let health;
-  try {
-    health = await client.getHealth();
-  } catch {
-    return { attempted: 0, uploaded: 0, failures: [] };
-  }
-  if (health.runtime.uploads !== 'configured') return { attempted: 0, uploaded: 0, failures: [] };
   const failures: AudioUploadFailure[] = [];
   let uploaded = 0;
 
@@ -58,23 +59,18 @@ export async function uploadPendingAudio(client: ApiClient): Promise<AudioUpload
       if (file.size !== recording.byteLength) {
         throw new Error('The local audio file size no longer matches its saved recording details.');
       }
-      const target = await client.createRecordingUploadUrl(recording.id);
-      objectKey = target.objectKey;
       await recordingStore.setSyncState(recording.id, 'uploading', {
-        objectKey,
         incrementAttempt: true
       });
-
-      const response = await fetch(target.url, {
-        method: 'PUT',
-        headers: { 'Content-Type': recording.mimeType },
-        body: file
+      const totalChunks = Math.max(1, Math.ceil(file.size / (1024 * 1024)));
+      onProgress?.({ recordingId: recording.id, outletName: recording.outletName, completedChunks: 0, totalChunks, state: 'uploading' });
+      const stored = await client.uploadRecordingAudio(recording.id, file, (completedChunks, total) => {
+        onProgress?.({ recordingId: recording.id, outletName: recording.outletName, completedChunks, totalChunks: total, state: 'uploading' });
       });
-      if (!response.ok) throw new Error(`S3 returned HTTP ${response.status} for the audio upload.`);
-
-      await client.completeRecordingUpload(recording.id);
+      objectKey = stored.objectKey;
       await recordingStore.setSyncState(recording.id, 'uploaded', { objectKey });
       uploaded += 1;
+      onProgress?.({ recordingId: recording.id, outletName: recording.outletName, completedChunks: totalChunks, totalChunks, state: 'complete' });
     } catch (error) {
       await recordingStore.setSyncState(recording.id, 'error', {
         objectKey,
@@ -87,6 +83,7 @@ export async function uploadPendingAudio(client: ApiClient): Promise<AudioUpload
           ? error.message
           : errorMessage(error)
       });
+      onProgress?.({ recordingId: recording.id, outletName: recording.outletName, completedChunks: 0, totalChunks: Math.max(1, Math.ceil(recording.byteLength / (1024 * 1024))), state: 'error' });
     }
   }
 

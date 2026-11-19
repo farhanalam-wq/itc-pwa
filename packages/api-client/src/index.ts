@@ -101,6 +101,7 @@ export interface ApiClient {
   createRecordingUploadUrl(recordingId: string): Promise<SignedRecordingUrl>;
   completeRecordingUpload(recordingId: string): Promise<RecordingMetadata>;
   getRecordingDownloadUrl(recordingId: string): Promise<SignedRecordingUrl>;
+  uploadRecordingAudio(recordingId: string, file: Blob, onChunk?: (sent: number, total: number) => void): Promise<RecordingMetadata>;
   ingestTranscript(input: CreateManualTranscriptRequest): Promise<ManualTranscriptAnalysis>;
   listTranscripts(): Promise<ManualTranscriptPage>;
   getTranscript(transcriptId: string): Promise<ManualTranscriptAnalysis>;
@@ -220,6 +221,18 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
     getRecordingDownloadUrl: (recordingId) => request<SignedRecordingUrl>(
       '/v1/recordings/' + encodeURIComponent(recordingId) + '/download-url'
     ),
+    uploadRecordingAudio: async (recordingId, file, onChunk) => {
+      const chunkSize = 1024 * 1024;
+      const total = Math.max(1, Math.ceil(file.size / chunkSize));
+      for (let index = 0; index < total; index += 1) {
+        const chunk = file.slice(index * chunkSize, Math.min(file.size, (index + 1) * chunkSize));
+        await request<{ received: boolean }>(`/v1/recordings/${encodeURIComponent(recordingId)}/audio/${index}/${total}`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/octet-stream' }, body: chunk
+        });
+        onChunk?.(index + 1, total);
+      }
+      return request<RecordingMetadata>(`/v1/recordings/${encodeURIComponent(recordingId)}/audio/complete`, { method: 'POST' });
+    },
     ingestTranscript: (input) => request<ManualTranscriptAnalysis>('/v1/transcripts', {
       method: 'POST',
       body: JSON.stringify(input)
