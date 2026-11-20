@@ -218,7 +218,7 @@ export class RecordingStore {
   async listMetadataRegistrationQueue(): Promise<LocalRecording[]> {
     const records = await listLocalRecordings();
     return records
-      .filter((record) => record.localState === 'ready' && Boolean(record.consentRecordedAt))
+      .filter((record) => record.localState === 'ready' && record.syncState !== 'uploaded' && Boolean(record.consentRecordedAt))
       .filter((record) => record.metadataRegistrationState === 'queued'
         || record.metadataRegistrationState === 'registering'
         || record.metadataRegistrationState === 'registered'

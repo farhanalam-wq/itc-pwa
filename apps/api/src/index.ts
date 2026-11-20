@@ -39,6 +39,9 @@ async function start(): Promise<void> {
     if (draining) return;
     draining = true;
     try {
+      for (const id of await repository.findRecordingsWithoutTranscription()) {
+        await transcriptionWorker.enqueue(id);
+      }
       while (true) {
         const result = await transcriptionWorker.runNext();
         if (result.state === 'not_ready' || result.state === 'busy') break;

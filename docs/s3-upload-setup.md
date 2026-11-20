@@ -1,6 +1,6 @@
 # Recording storage and S3 setup
 
-The field PWA saves one merged conversation audio file in OPFS. When connectivity returns, it registers visit/recording metadata and sends bounded transport chunks to the API. The API validates and assembles those chunks, writes one final audio object to the selected storage adapter, and persists its reference/checksum in MongoDB. Transport chunks are temporary staging data; they do not become separate S3 objects.
+The field PWA saves one merged conversation audio file in OPFS. When connectivity returns, it registers the visit and pending upload and sends 1 MiB transport chunks to the API. The API validates and assembles those chunks, writes one final audio object, then creates the completed MongoDB recording with its storage reference and checksum. Transport chunks are temporary staging data; they do not become separate S3 objects.
 
 ```text
 PWA recording -> OPFS queue -> API chunk staging -> one final local/S3 audio object
@@ -73,4 +73,4 @@ Create the first administrator using the manager setup form and steps in [admin 
 4. In the manager, sign in and open **Transcript status** on the real capture. Confirm it advances through queue/transcription to the returned plain text, or shows a clear retryable/permanent error.
 5. For S3 mode, verify the final key exists under the configured prefix and MongoDB contains the same object key/checksum. For local mode, verify one file exists under the persistent local root.
 
-The current workspace has not been exercised against live AWS, MongoDB, or OpenAI credentials. Use the preceding checks in the configured deployment before the demo; code-level in-process workflow checks are documented in `docs/implementation-plan.md`.
+Live S3, MongoDB, and OpenAI were verified with synthetic speech and an isolated MongoDB database. To verify offline capture and reload in a browser, build with `bun run build` and start the field app with `bun run --cwd apps/field-pwa preview`. Open the preview online once so the service worker can cache the app before disconnecting. The Vite dev server does not register the offline service worker.

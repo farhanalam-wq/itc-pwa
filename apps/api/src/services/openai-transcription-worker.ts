@@ -49,11 +49,12 @@ export class OpenAITranscriptionWorker {
       if (!this.isStored(recording)) {
         const failed = await this.jobs.markFailed({
           recordingId: job.recordingId,
+          attempt: job.attempts,
           errorCode: 'recording_not_stored',
           errorMessage: 'The recording is not available in configured storage.',
           retryable: true
         });
-        if (!failed) throw new Error('Could not persist the transcription failure state.');
+        if (!failed) return { state: 'not_ready' };
         await this.recordings.transitionAnalysisState(job.recordingId, 'error');
         return { state: 'failed', job: failed };
       }
@@ -64,15 +65,17 @@ export class OpenAITranscriptionWorker {
       if (recording.byteLength > OPENAI_TRANSCRIPTION_MAX_BYTES) {
         const failed = await this.jobs.markFailed({
           recordingId: job.recordingId,
+          attempt: job.attempts,
           errorCode: 'audio_too_large',
-          errorMessage: 'This recording exceeds OpenAI’s 25 MiB transcription file limit.',
+          errorMessage: 'This recording exceeds OpenAI’s 25 MB transcription file limit.',
           retryable: false
         });
-        if (!failed) throw new Error('Could not persist the transcription failure state.');
+        if (!failed) return { state: 'not_ready' };
+        await this.recordings.transitionAnalysisState(recording.id, 'error');
         return { state: 'failed', job: failed };
       }
 
-      const bytes = await this.storage.readFinal(recording.objectKey);
+      const bytes = await this.storage.readFinal(recording.objectKey, recording.storageDriver);
       const result = await this.provider.transcribe({
         recordingId: recording.id,
         mimeType: recording.mimeType,
@@ -80,11 +83,12 @@ export class OpenAITranscriptionWorker {
       });
       const completed = await this.jobs.markCompleted({
         recordingId: recording.id,
+        attempt: job.attempts,
         transcriptText: result.text,
         languageCodes: result.languageCodes,
         model: result.model
       });
-      if (!completed) throw new Error('Could not persist the transcription result.');
+      if (!completed) return { state: 'not_ready' };
       await this.recordings.transitionAnalysisState(recording.id, 'ready');
       return { state: 'completed', job: completed };
     } catch (error) {
@@ -97,11 +101,12 @@ export class OpenAITranscriptionWorker {
         );
       const failed = await this.jobs.markFailed({
         recordingId: job.recordingId,
+        attempt: job.attempts,
         errorCode: normalized.code,
         errorMessage: normalized.message,
         retryable: normalized.retryable
       });
-      if (!failed) throw new Error('Could not persist the transcription failure state.');
+      if (!failed) return { state: 'not_ready' };
       await this.recordings.transitionAnalysisState(job.recordingId, 'error');
       return { state: 'failed', job: failed };
     }

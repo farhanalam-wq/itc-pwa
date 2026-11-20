@@ -1,4 +1,4 @@
-import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -25,7 +25,7 @@ export interface FinalRecordingInput {
 export interface RecordingObjectStorage {
   readonly driver: 'local' | 's3';
   putFinal(input: FinalRecordingInput): Promise<StoredRecordingObject>;
-  readFinal(objectKey: string): Promise<Uint8Array>;
+  readFinal(objectKey: string, driver?: 'local' | 's3'): Promise<Uint8Array>;
   createDownloadUrl(objectKey: string): Promise<{ url: string; expiresAt: string }>;
 }
 
@@ -130,15 +130,28 @@ class S3ObjectStorage implements RecordingObjectStorage {
     const objectKey = stableKey(s3RecordingPrefix, input);
     const checksum = hash(input.bytes);
 
-    // One PutObject for the finalized, merged conversation. Chunk uploads are transport only.
-    await this.client.send(new PutObjectCommand({
-      Bucket: s3BucketName,
-      Key: objectKey,
-      Body: input.bytes,
-      ContentLength: input.bytes.byteLength,
-      ContentType: input.mimeType,
-      Metadata: { 'recording-id': input.id, sha256: checksum }
-    }));
+    try {
+      await this.client.send(new PutObjectCommand({
+        Bucket: s3BucketName,
+        Key: objectKey,
+        Body: input.bytes,
+        ContentLength: input.bytes.byteLength,
+        ContentType: input.mimeType,
+        ChecksumSHA256: Buffer.from(checksum, 'hex').toString('base64'),
+        IfNoneMatch: '*',
+        Metadata: { 'recording-id': input.id, sha256: checksum }
+      }));
+    } catch (error) {
+      const preconditionFailed = error instanceof Error && error.name === 'PreconditionFailed';
+      if (!preconditionFailed) throw error;
+
+      // The previous request may have stored the file before the API could confirm it.
+      const existing = await this.client.send(new HeadObjectCommand({ Bucket: s3BucketName, Key: objectKey }));
+      if (existing.ContentLength !== input.bytes.byteLength || existing.ContentType !== input.mimeType
+        || existing.Metadata?.sha256 !== checksum) {
+        throw new RecordingStorageError('The S3 key already contains different audio.');
+      }
+    }
 
     return {
       driver: this.driver,
@@ -169,5 +182,19 @@ class S3ObjectStorage implements RecordingObjectStorage {
 }
 
 export function createRecordingStorage(config: StorageConfig): RecordingObjectStorage {
-  return config.driver === 's3' ? new S3ObjectStorage(config) : new LocalObjectStorage(config);
+  const local = new LocalObjectStorage(config);
+  const s3 = config.awsRegion && config.s3BucketName ? new S3ObjectStorage(config) : undefined;
+  const active = config.driver === 's3' ? (s3 ?? new S3ObjectStorage(config)) : local;
+  const forDriver = (driver: 'local' | 's3') => {
+    if (driver === 'local') return local;
+    if (s3) return s3;
+    throw new RecordingStorageError('S3 storage is unavailable.');
+  };
+
+  return {
+    driver: active.driver,
+    putFinal: (input) => active.putFinal(input),
+    readFinal: (objectKey, driver = active.driver) => forDriver(driver).readFinal(objectKey),
+    createDownloadUrl: (objectKey) => forDriver('s3').createDownloadUrl(objectKey)
+  };
 }

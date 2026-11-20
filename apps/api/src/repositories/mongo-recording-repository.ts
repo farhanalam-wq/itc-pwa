@@ -1,5 +1,5 @@
 import type { Db, Document } from 'mongodb';
-import type { AnalysisState, RecordingMetadata, SyncState } from '@itc/domain';
+import type { AnalysisState, RecordingMetadata } from '@itc/domain';
 import type {
   CreateRecordingInput,
   CreateRecordingResult,
@@ -51,15 +51,18 @@ function recordingValue(document: RecordingDocument): RecordingMetadata {
 export class MongoRecordingRepository implements RecordingRepository {
   private readonly visits;
   private readonly recordings;
+  private readonly pendingUploads;
 
   constructor(database: Db) {
     this.visits = database.collection<VisitDocument>('visits');
     this.recordings = database.collection<RecordingDocument>('recordings');
+    this.pendingUploads = database.collection<RecordingDocument>('pending_recording_uploads');
   }
 
   async initialize(): Promise<void> {
     await Promise.all([
       this.visits.createIndex({ id: 1 }, { unique: true, name: 'visit_id_unique' }),
+      this.pendingUploads.createIndex({ id: 1 }, { unique: true, name: 'pending_recording_id_unique' }),
       this.recordings.createIndex({ id: 1 }, { unique: true, name: 'recording_id_unique' }),
       this.recordings.createIndex({ visitId: 1, startedAt: -1 }, { name: 'recording_visit_history' }),
       this.recordings.createIndex({ syncState: 1, startedAt: -1 }, { name: 'recording_sync_queue' }),
@@ -89,7 +92,9 @@ export class MongoRecordingRepository implements RecordingRepository {
 
   async getVisit(id: string): Promise<VisitRecord | undefined> {
     const found = await this.visits.findOne({ id });
-    return found ? visitValue(found) : undefined;
+    if (!found) return undefined;
+    const recordings = await this.recordings.find({ visitId: id, syncState: 'uploaded' }, { projection: { id: 1 } }).toArray();
+    return { ...visitValue(found), recordingIds: recordings.map((recording) => recording.id) };
   }
 
   async createRecording(visitId: string, input: CreateRecordingInput): Promise<CreateRecordingResult<RecordingMetadata>> {
@@ -97,7 +102,7 @@ export class MongoRecordingRepository implements RecordingRepository {
     if (!visitDocument) return { kind: 'parent_not_found' };
     const visit = visitValue(visitDocument);
 
-    const existing = await this.recordings.findOne({ id: input.id });
+    const existing = await this.findUpload(input.id);
     if (existing) {
       const value = recordingValue(existing);
       return existing.visitId === visitId && recordingMatches(value, input)
@@ -119,12 +124,11 @@ export class MongoRecordingRepository implements RecordingRepository {
     };
 
     try {
-      await this.recordings.insertOne({ ...value, visitId });
-      await this.visits.updateOne({ id: visitId }, { $addToSet: { recordingIds: value.id } });
+      await this.pendingUploads.insertOne({ ...value, visitId });
       return { kind: 'created', value };
     } catch (error) {
       if (!duplicateKey(error)) throw error;
-      const raced = await this.recordings.findOne({ id: input.id });
+      const raced = await this.findUpload(input.id);
       if (!raced) throw error;
       const racedValue = recordingValue(raced);
       return raced.visitId === visitId && recordingMatches(racedValue, input)
@@ -133,25 +137,36 @@ export class MongoRecordingRepository implements RecordingRepository {
     }
   }
 
+  private async findUpload(id: string) {
+    // Promotion inserts the completed record before removing its pending entry.
+    const pending = await this.pendingUploads.findOne({ id });
+    return await this.recordings.findOne({ id }) ?? pending;
+  }
+
+  async getUploadRecording(id: string): Promise<RecordingMetadata | undefined> {
+    const found = await this.findUpload(id);
+    return found ? recordingValue(found) : undefined;
+  }
+
   async getRecording(id: string): Promise<RecordingMetadata | undefined> {
-    const found = await this.recordings.findOne({ id });
+    const found = await this.recordings.findOne({ id, syncState: 'uploaded' });
     return found ? recordingValue(found) : undefined;
   }
 
   async getRecordingVisitId(id: string): Promise<string | undefined> {
-    const found = await this.recordings.findOne({ id }, { projection: { visitId: 1 } });
+    const found = await this.recordings.findOne({ id, syncState: 'uploaded' }, { projection: { visitId: 1 } });
     return found?.visitId;
   }
 
   async getAnalysisStatus(id: string): Promise<Pick<RecordingMetadata, 'id' | 'syncState' | 'analysisState'> | undefined> {
-    const found = await this.recordings.findOne({ id }, { projection: { id: 1, syncState: 1, analysisState: 1 } });
+    const found = await this.recordings.findOne({ id, syncState: 'uploaded' }, { projection: { id: 1, syncState: 1, analysisState: 1 } });
     if (!found) return undefined;
     return { id: found.id, syncState: found.syncState, analysisState: found.analysisState };
   }
 
   async listRecordings(filters: RecordingFilters): Promise<RecordingPage> {
-    const query: Document = {};
-    if (filters.syncState) query.syncState = filters.syncState;
+    if (filters.syncState && filters.syncState !== 'uploaded') return { recordings: [], total: 0, nextOffset: null };
+    const query: Document = { syncState: 'uploaded' };
     if (filters.analysisState) query.analysisState = filters.analysisState;
     if (filters.representativeId) query.representativeId = filters.representativeId;
     if (filters.territoryId) query.territoryId = filters.territoryId;
@@ -165,35 +180,44 @@ export class MongoRecordingRepository implements RecordingRepository {
     return { recordings, total, nextOffset: next < total ? next : null };
   }
 
-  async transitionSyncState(id: string, next: SyncState, objectKey?: string): Promise<boolean> {
-    const allowedFrom: Record<SyncState, SyncState[]> = {
-      queued: ['error'],
-      uploading: ['queued'],
-      uploaded: ['uploading'],
-      error: ['queued', 'uploading']
+  async completeRecording(id: string, stored: StoredObjectMetadata): Promise<RecordingMetadata | undefined> {
+    const upload = await this.findUpload(id);
+    if (!upload || upload.byteLength !== stored.byteLength || upload.mimeType !== stored.mimeType) return undefined;
+    const completed = {
+      ...recordingValue(upload),
+      visitId: upload.visitId,
+      syncState: 'uploaded' as const,
+      analysisState: 'not_started' as const,
+      storageDriver: stored.driver,
+      objectKey: stored.objectKey,
+      sha256: stored.sha256
     };
-    const filter: Document = { id, syncState: { $in: allowedFrom[next] } };
-    const update: Document = { syncState: next };
-    if (objectKey) update.objectKey = objectKey;
-    if (next === 'uploaded') update.analysisState = 'not_started';
-    const result = await this.recordings.updateOne(filter, { $set: update });
-    return result.modifiedCount === 1;
+
+    // Also promotes pending records created by versions that used a single collection.
+    try {
+      await this.recordings.updateOne(
+        { id, syncState: { $ne: 'uploaded' } },
+        { $set: completed },
+        { upsert: true }
+      );
+    } catch (error) {
+      if (!duplicateKey(error)) throw error;
+    }
+    const saved = await this.getRecording(id);
+    if (!saved || saved.sha256 !== stored.sha256 || saved.storageDriver !== stored.driver || saved.objectKey !== stored.objectKey) return undefined;
+    await this.pendingUploads.deleteOne({ id }).catch(() => undefined);
+    return saved;
   }
 
-  async attachStoredObject(id: string, stored: StoredObjectMetadata): Promise<boolean> {
-    const result = await this.recordings.updateOne(
-      { id, byteLength: stored.byteLength, mimeType: stored.mimeType },
-      {
-        $set: {
-          storageDriver: stored.driver,
-          objectKey: stored.objectKey,
-          byteLength: stored.byteLength,
-          mimeType: stored.mimeType,
-          sha256: stored.sha256
-        }
-      }
-    );
-    return result.matchedCount === 1;
+  async findRecordingsWithoutTranscription(limit = 100): Promise<string[]> {
+    const missing = await this.recordings.aggregate<{ id: string }>([
+      { $match: { syncState: 'uploaded', objectKey: { $type: 'string' } } },
+      { $lookup: { from: 'transcription_jobs', localField: 'id', foreignField: 'recordingId', as: 'jobs' } },
+      { $match: { 'jobs.0': { $exists: false } } },
+      { $limit: limit },
+      { $project: { _id: 0, id: 1 } }
+    ]).toArray();
+    return missing.map(({ id }) => id);
   }
 
   async transitionAnalysisState(id: string, next: AnalysisState): Promise<boolean> {

@@ -1,7 +1,7 @@
 import OpenAI from 'openai';
 import { toFile } from 'openai/uploads';
 
-export const OPENAI_TRANSCRIPTION_MAX_BYTES = 25 * 1024 * 1024;
+export const OPENAI_TRANSCRIPTION_MAX_BYTES = 25_000_000;
 export const OPENAI_TRANSCRIPTION_MODEL = 'gpt-transcribe';
 
 export interface AudioTranscriptionInput {
@@ -45,6 +45,7 @@ const supportedMimeExtensions: Record<string, string> = {
   'video/mp4': 'mp4',
   'audio/mpga': 'mpga',
   'audio/m4a': 'm4a',
+  'audio/x-m4a': 'm4a',
   'audio/ogg': 'ogg',
   'audio/wav': 'wav',
   'audio/x-wav': 'wav',
@@ -94,7 +95,7 @@ export class OpenAIAudioTranscriptionProvider implements AudioTranscriptionProvi
     if (input.bytes.byteLength > OPENAI_TRANSCRIPTION_MAX_BYTES) {
       throw new AudioTranscriptionError(
         'audio_too_large',
-        'This recording exceeds OpenAI’s 25 MiB transcription file limit.'
+        'This recording exceeds OpenAI’s 25 MB transcription file limit.'
       );
     }
 

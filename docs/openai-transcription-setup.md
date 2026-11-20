@@ -24,7 +24,7 @@ Restart the API after changing the key. The API health response reports transcri
 - The transcript job state is `queued`, `processing`, `completed`, or `failed`. Stale processing leases are reclaimed after ten minutes; the API checks the durable queue on startup and every minute.
 - Temporary provider/network failures are retryable. The manager can request a retry through the authenticated recording transcript endpoint after a later UI phase exposes that action.
 - The provider returns plain transcript text and detected language codes when present. This model path does not supply speaker turns, word/segment timestamps, or confidence, so the API does not invent them.
-- Files over 25 MiB fail transcription with a clear `audio_too_large` state. Their already stored audio remains intact. This MVP does not split or compress audio because splitting can damage conversational context and requires explicit stitching behavior.
+- New recordings over 25 MB stay on the device and cannot be synced by this flow. Older uploaded recordings over the limit stay available for playback and receive an `audio_too_large` transcription status.
 - Transcript text and language metadata are stored in the MongoDB `transcription_jobs` collection. Audio remains in the selected local/S3 object store.
 
 OpenAI file transcription guide: <https://developers.openai.com/api/docs/guides/speech-to-text>

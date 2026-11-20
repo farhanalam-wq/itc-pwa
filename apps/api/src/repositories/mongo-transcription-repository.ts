@@ -27,6 +27,7 @@ export interface TranscriptionJobRepository {
   claimNext(recordingId?: string, now?: Date): Promise<TranscriptionJob | undefined>;
   markCompleted(input: {
     recordingId: string;
+    attempt: number;
     transcriptText: string;
     languageCodes: string[];
     model: string;
@@ -34,6 +35,7 @@ export interface TranscriptionJobRepository {
   }): Promise<TranscriptionJob | undefined>;
   markFailed(input: {
     recordingId: string;
+    attempt: number;
     errorCode: string;
     errorMessage: string;
     retryable: boolean;
@@ -141,6 +143,7 @@ export class MongoTranscriptionRepository {
 
   async markCompleted(input: {
     recordingId: string;
+    attempt: number;
     transcriptText: string;
     languageCodes: string[];
     model: string;
@@ -148,7 +151,7 @@ export class MongoTranscriptionRepository {
   }): Promise<TranscriptionJob | undefined> {
     const now = input.now ?? new Date();
     const updated = await this.jobs.findOneAndUpdate(
-      { recordingId: input.recordingId, state: 'processing' },
+      { recordingId: input.recordingId, state: 'processing', attempts: input.attempt },
       {
         $set: {
           state: 'completed',
@@ -168,6 +171,7 @@ export class MongoTranscriptionRepository {
 
   async markFailed(input: {
     recordingId: string;
+    attempt: number;
     errorCode: string;
     errorMessage: string;
     retryable: boolean;
@@ -175,7 +179,7 @@ export class MongoTranscriptionRepository {
   }): Promise<TranscriptionJob | undefined> {
     const now = input.now ?? new Date();
     const updated = await this.jobs.findOneAndUpdate(
-      { recordingId: input.recordingId, state: 'processing' },
+      { recordingId: input.recordingId, state: 'processing', attempts: input.attempt },
       {
         $set: {
           state: 'failed',

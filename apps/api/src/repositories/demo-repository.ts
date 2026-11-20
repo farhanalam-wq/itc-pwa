@@ -64,12 +64,12 @@ export interface RecordingRepository {
   createVisit(input: CreateVisitInput): Promise<CreateResult<VisitRecord>>;
   getVisit(id: string): Promise<VisitRecord | undefined>;
   createRecording(visitId: string, input: CreateRecordingInput): Promise<CreateRecordingResult<RecordingMetadata>>;
+  getUploadRecording(id: string): Promise<RecordingMetadata | undefined>;
   getRecording(id: string): Promise<RecordingMetadata | undefined>;
   getRecordingVisitId(id: string): Promise<string | undefined>;
   getAnalysisStatus(id: string): Promise<Pick<RecordingMetadata, 'id' | 'syncState' | 'analysisState'> | undefined>;
   listRecordings(filters: RecordingFilters): Promise<RecordingPage>;
-  transitionSyncState(id: string, next: SyncState, objectKey?: string): Promise<boolean>;
-  attachStoredObject(id: string, stored: StoredObjectMetadata): Promise<boolean>;
+  completeRecording(id: string, stored: StoredObjectMetadata): Promise<RecordingMetadata | undefined>;
   transitionAnalysisState(id: string, next: AnalysisState): Promise<boolean>;
 }
 
@@ -86,13 +86,6 @@ function recordingInputMatches(recording: RecordingMetadata, input: CreateRecord
     && recording.mimeType === input.mimeType
     && recording.byteLength === input.byteLength;
 }
-
-const allowedSyncTransitions: Record<SyncState, readonly SyncState[]> = {
-  queued: ['uploading', 'error'],
-  uploading: ['uploaded', 'error'],
-  uploaded: [],
-  error: ['queued']
-};
 
 const allowedAnalysisTransitions: Record<AnalysisState, readonly AnalysisState[]> = {
   not_started: ['transcribing'],
@@ -158,22 +151,26 @@ export class DemoRecordingRepository implements RecordingRepository {
       analysisState: 'not_started'
     };
 
-    visit.recordingIds.push(recording.id);
     this.recordings.set(recording.id, recording);
     this.visitByRecordingId.set(recording.id, visit.id);
     return { kind: 'created', value: recording };
   }
 
-  async getRecording(id: string): Promise<RecordingMetadata | undefined> {
+  async getUploadRecording(id: string): Promise<RecordingMetadata | undefined> {
     return this.recordings.get(id);
   }
 
+  async getRecording(id: string): Promise<RecordingMetadata | undefined> {
+    const recording = await this.getUploadRecording(id);
+    return recording?.syncState === 'uploaded' ? recording : undefined;
+  }
+
   async getRecordingVisitId(id: string): Promise<string | undefined> {
-    return this.visitByRecordingId.get(id);
+    return await this.getRecording(id) ? this.visitByRecordingId.get(id) : undefined;
   }
 
   async getAnalysisStatus(id: string): Promise<Pick<RecordingMetadata, 'id' | 'syncState' | 'analysisState'> | undefined> {
-    const recording = this.recordings.get(id);
+    const recording = await this.getRecording(id);
     if (!recording) return undefined;
     return {
       id: recording.id,
@@ -184,6 +181,7 @@ export class DemoRecordingRepository implements RecordingRepository {
 
   async listRecordings(filters: RecordingFilters): Promise<RecordingPage> {
     const matching = Array.from(this.recordings.values())
+      .filter((recording) => recording.syncState === 'uploaded')
       .filter((recording) => !filters.syncState || recording.syncState === filters.syncState)
       .filter((recording) => !filters.analysisState || recording.analysisState === filters.analysisState)
       .filter((recording) => !filters.representativeId || recording.representativeId === filters.representativeId)
@@ -199,22 +197,17 @@ export class DemoRecordingRepository implements RecordingRepository {
     };
   }
 
-  async transitionSyncState(id: string, next: SyncState, objectKey?: string): Promise<boolean> {
+  async completeRecording(id: string, stored: StoredObjectMetadata): Promise<RecordingMetadata | undefined> {
     const recording = this.recordings.get(id);
-    if (!recording || !allowedSyncTransitions[recording.syncState].includes(next)) return false;
-    recording.syncState = next;
-    if (objectKey) recording.objectKey = objectKey;
-    if (next === 'uploaded') recording.analysisState = 'not_started';
-    return true;
-  }
-
-  async attachStoredObject(id: string, stored: StoredObjectMetadata): Promise<boolean> {
-    const recording = this.recordings.get(id);
-    if (!recording || recording.byteLength !== stored.byteLength || recording.mimeType !== stored.mimeType) return false;
+    if (!recording || recording.byteLength !== stored.byteLength || recording.mimeType !== stored.mimeType) return undefined;
+    if (recording.syncState === 'uploaded') return recording.sha256 === stored.sha256 ? recording : undefined;
     recording.objectKey = stored.objectKey;
     recording.storageDriver = stored.driver;
     recording.sha256 = stored.sha256;
-    return true;
+    recording.syncState = 'uploaded';
+    const visitId = this.visitByRecordingId.get(id);
+    if (visitId) this.visits.get(visitId)?.recordingIds.push(id);
+    return recording;
   }
 
   async transitionAnalysisState(id: string, next: AnalysisState): Promise<boolean> {

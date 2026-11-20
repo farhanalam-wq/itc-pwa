@@ -26,7 +26,7 @@ import {
   S3RecordingUploads
 } from './services/s3-recording-uploads';
 
-const MAX_RECORDING_BYTES = 25 * 1024 * 1024;
+const MAX_RECORDING_BYTES = 25_000_000;
 
 async function readBoundedAudioChunk(request: Request): Promise<Uint8Array> {
   const declaredLength = Number(request.headers.get('content-length'));
@@ -344,7 +344,7 @@ export function createApp(
       service: 'itc-field-source-api',
       runtime: {
         persistence: repository instanceof DemoRecordingRepository ? 'in-memory-demo' as const : 'mongodb' as const,
-        uploads: uploads.configured ? 'configured' as const : 'not-configured' as const,
+        uploads: 'configured' as const,
         analysis: readOpenAITranscriptionConfig().configured ? 'configured' as const : 'not-configured' as const,
         storageDriver: recordingStorage.driver
       } satisfies ApiRuntimeInfo
@@ -600,9 +600,9 @@ export function createApp(
       params: recordingChunkParams,
       response: { 200: t.Object({ received: t.Boolean() }), 400: errorSchema, 404: errorSchema, 409: errorSchema, 500: errorSchema }
     }, async ({ params, request, status }) => {
-      const recording = await repository.getRecording(params.recordingId);
+      const recording = await repository.getUploadRecording(params.recordingId);
       if (!recording) return status(404, { code: 'recording_not_found', message: 'Register visit details before uploading audio.' });
-      if (recording.syncState === 'uploaded') return status(409, { code: 'recording_already_uploaded', message: 'This conversation audio is already stored.' });
+      if (recording.syncState === 'uploaded') return { received: true };
       if (!Number.isInteger(params.chunkIndex) || !Number.isInteger(params.chunkCount)
         || params.chunkCount < 1 || params.chunkIndex < 0 || params.chunkIndex >= params.chunkCount) {
         return status(409, { code: 'invalid_audio_chunk', message: 'The audio chunk index or count is invalid.' });
@@ -644,7 +644,7 @@ export function createApp(
       params: recordingParams,
       response: { 200: recordingSchema, 404: errorSchema, 409: errorSchema, 500: errorSchema, 503: errorSchema }
     }, async ({ params, status }) => {
-      let recording = await repository.getRecording(params.recordingId);
+      const recording = await repository.getUploadRecording(params.recordingId);
       if (!recording) return status(404, { code: 'recording_not_found', message: 'Recording metadata was not found.' });
       try {
         if (recording.syncState === 'uploaded') {
@@ -658,41 +658,30 @@ export function createApp(
           expectedByteLength: recording.byteLength
         });
 
-        if (recording.syncState === 'error') {
-          await repository.transitionSyncState(recording.id, 'queued');
-          recording = (await repository.getRecording(recording.id))!;
-        }
-        if (recording.syncState === 'queued') {
-          const started = await repository.transitionSyncState(recording.id, 'uploading');
-          if (!started) return status(409, { code: 'recording_upload_conflict', message: 'The recording upload state changed. Retry completion.' });
-        } else if (recording.syncState !== 'uploading') {
-          return status(409, { code: 'recording_not_uploadable', message: 'The recording is not ready for storage.' });
-        }
-
         const stored = await recordingStorage.putFinal({
           id: recording.id,
           startedAt: recording.startedAt,
           mimeType: recording.mimeType,
           bytes
         });
-        const attached = await repository.attachStoredObject(recording.id, stored);
-        if (!attached) return status(409, { code: 'recording_metadata_mismatch', message: 'Stored audio did not match the registered recording metadata.' });
-        const completed = await repository.transitionSyncState(recording.id, 'uploaded', stored.objectKey);
-        recording = (await repository.getRecording(recording.id))!;
-        if (!completed && recording.syncState !== 'uploaded') {
-          return status(503, { code: 'recording_finalize_pending', message: 'The audio is stored, but the API has not confirmed completion yet. Retry sync from the device.' });
+        const completed = await repository.completeRecording(recording.id, stored);
+        if (!completed) {
+          return status(409, { code: 'recording_metadata_mismatch', message: 'Stored audio did not match the registered recording.' });
         }
         await localStorage.removeStaged(recording.id, recording.startedAt, recording.mimeType).catch(() => undefined);
         await scheduleTranscription(recording.id);
-        return recording;
+        return completed;
       } catch (error) {
         if (error instanceof UploadStagingError) {
+          const completed = await repository.getRecording(recording.id);
+          if (completed) {
+            await scheduleTranscription(recording.id);
+            return completed;
+          }
           return status(409, { code: error.code, message: error.message });
         }
-        const current = await repository.getRecording(params.recordingId);
-        if (current && (current.syncState === 'queued' || current.syncState === 'uploading')) {
-          await repository.transitionSyncState(current.id, 'error');
-        }
+        const name = error instanceof Error ? error.name : 'UnknownError';
+        console.error('Recording finalization failed:', name);
         return status(500, { code: 'audio_finalize_failed', message: 'The API could not persist the finalized conversation audio. The device copy remains queued for retry.' });
       }
     })
@@ -741,7 +730,7 @@ export function createApp(
         return status(409, { code: 'recording_not_available', message: 'The local audio file is not available.' });
       }
       try {
-        const audio = await recordingStorage.readFinal(recording.objectKey);
+        const audio = await recordingStorage.readFinal(recording.objectKey, 'local');
         const body = new Uint8Array(new ArrayBuffer(audio.byteLength));
         body.set(audio);
         return new Response(body, {
@@ -848,7 +837,7 @@ export function createApp(
       params: recordingParams,
       response: { 200: t.Object({ id: t.String(), syncState: syncStateSchema }), 404: errorSchema }
     }, async ({ params, status }) => {
-      const recording = await repository.getRecording(params.recordingId);
+      const recording = await repository.getUploadRecording(params.recordingId);
       if (!recording) return status(404, { code: 'recording_not_found', message: 'The requested recording does not exist.' });
       return { id: recording.id, syncState: recording.syncState };
     })

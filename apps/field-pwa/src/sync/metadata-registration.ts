@@ -3,7 +3,7 @@ import type { RecordingMetadata } from '@itc/domain';
 import { recordingStore } from '../storage/recording-store';
 import type { LocalRecording } from '../storage/indexed-db';
 
-const MAX_OPENAI_TRANSCRIPTION_BYTES = 25 * 1024 * 1024;
+const MAX_OPENAI_TRANSCRIPTION_BYTES = 25_000_000;
 
 export interface MetadataRegistrationResult {
   visit: VisitRecord;
@@ -73,7 +73,7 @@ export async function registerFinalizedMetadata(
   try {
     if (localRecording.byteLength > MAX_OPENAI_TRANSCRIPTION_BYTES) {
       throw new ApiClientError(
-        'This recording is larger than 25 MiB. It remains saved on this device, but the current transcription service cannot accept it. Shorten the recording before retrying sync.',
+        'This recording is larger than 25 MB. It remains saved on this device, but the current transcription service cannot accept it. Shorten the recording before retrying sync.',
         413,
         'recording_too_large',
         false
@@ -102,8 +102,7 @@ export async function registerFinalizedMetadata(
 
 /**
  * Process the durable metadata queue when the app starts or returns online.
- * Previously registered records are replayed by stable ID too: the demo API
- * uses in-memory storage and may have restarted since the last registration.
+ * Replays pending registrations by stable ID after interruptions.
  */
 export async function registerPendingMetadata(
   client: ApiClient
