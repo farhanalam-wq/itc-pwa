@@ -170,6 +170,9 @@ function FieldApp() {
   const [representativeId, setRepresentativeId] = useState('');
   const [territoryId, setTerritoryId] = useState('');
   const [consent, setConsent] = useState(false);
+  const [microphones, setMicrophones] = useState<MediaDeviceInfo[]>([]);
+  const [microphoneId, setMicrophoneId] = useState('');
+  const [checkingMicrophones, setCheckingMicrophones] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [meterLevels, setMeterLevels] = useState(initialMeter);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -196,7 +199,7 @@ function FieldApp() {
   const canStart = support.supported
     && Boolean(outletName.trim() && representativeId.trim() && territoryId.trim())
     && consent
-    && recorderState === 'ready';
+    && recorderState === 'ready' && !checkingMicrophones;
   const queueCount = useMemo(() => records.filter((record) => record.localState === 'ready'
     && (record.syncState === 'queued' || record.syncState === 'uploading'
       || (record.syncState === 'error' && record.uploadRetryable !== false))).length, [records]);
@@ -340,6 +343,39 @@ function FieldApp() {
     }
   }
 
+  const refreshMicrophones = useCallback(async () => {
+    if (!navigator.mediaDevices?.enumerateDevices) return;
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    setMicrophones(devices.filter((device) =>
+      device.kind === 'audioinput' && device.label && device.deviceId
+      && device.deviceId !== 'default' && device.deviceId !== 'communications'));
+  }, []);
+
+  useEffect(() => {
+    const onDeviceChange = () => { void refreshMicrophones().catch(() => undefined); };
+    onDeviceChange();
+    navigator.mediaDevices?.addEventListener('devicechange', onDeviceChange);
+    return () => navigator.mediaDevices?.removeEventListener('devicechange', onDeviceChange);
+  }, [refreshMicrophones]);
+
+  async function handleCheckMicrophones() {
+    if (!navigator.mediaDevices?.getUserMedia) return;
+    setCheckingMicrophones(true);
+    setNotice(null);
+    let stream: MediaStream | undefined;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      await refreshMicrophones();
+    } catch (error) {
+      setNotice({ kind: 'error', text: error instanceof DOMException && error.name === 'NotAllowedError'
+        ? 'Allow microphone access in your browser to see available inputs.'
+        : 'Could not find a microphone. Check your device’s sound input settings.' });
+    } finally {
+      stream?.getTracks().forEach((track) => track.stop());
+      setCheckingMicrophones(false);
+    }
+  }
+
   async function handleStart() {
     setNotice(null);
     if (!support.supported) {
@@ -362,16 +398,20 @@ function FieldApp() {
     setRecorderState('starting');
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+        audio: microphoneId ? { deviceId: { exact: microphoneId } } : true
       });
       streamRef.current = stream;
-      const mimeType = getPreferredMimeType();
+      void refreshMicrophones().catch(() => undefined);
+      const preferredMimeType = getPreferredMimeType();
+      const recorder = preferredMimeType ? new MediaRecorder(stream, { mimeType: preferredMimeType }) : new MediaRecorder(stream);
+      const mimeType = recorder.mimeType || preferredMimeType;
+      if (!mimeType) throw new Error('The browser did not report its recording format. Try a current browser.');
       const startedAt = new Date().toISOString();
       const writer = await recordingStore.create({
         outletName: outletName.trim(),
         representativeId: representativeId.trim(),
         territoryId: territoryId.trim(),
-        mimeType: mimeType ?? 'audio/webm',
+        mimeType,
         consentRecordedAt: startedAt,
         startedAt
       });
@@ -382,7 +422,6 @@ function FieldApp() {
       startedAtRef.current = Date.now();
       setElapsed(0);
 
-      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
       recorderRef.current = recorder;
       recorder.addEventListener('dataavailable', (event) => {
         if (!event.data.size || !writerRef.current) return;
@@ -416,7 +455,9 @@ function FieldApp() {
       const permissionDenied = error instanceof DOMException && (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError');
       setNotice({ kind: 'error', text: permissionDenied
         ? 'Microphone permission was denied. Allow microphone access for this PWA, then try again.'
-        : message });
+        : microphoneId && error instanceof DOMException && (error.name === 'OverconstrainedError' || error.name === 'NotFoundError')
+          ? 'The selected microphone is unavailable. Reconnect it or choose System default.'
+          : message });
       await refreshLocalState();
     }
   }
@@ -576,6 +617,19 @@ function FieldApp() {
             <label>Representative<input value={representativeId} onChange={(event) => setRepresentativeId(event.target.value)} placeholder="Your name or ID" autoComplete="name" disabled={recorderState !== 'ready'}/></label>
             <label>Territory<input value={territoryId} onChange={(event) => setTerritoryId(event.target.value)} placeholder="Route or area" disabled={recorderState !== 'ready'}/></label>
           </div>
+          {typeof navigator.mediaDevices?.getUserMedia === 'function' && <div className="microphone-field">
+            <label>Microphone
+              <select value={microphoneId} onChange={(event) => setMicrophoneId(event.target.value)} disabled={recorderState !== 'ready' || checkingMicrophones}>
+                <option value="">System default</option>
+                {microphoneId && !microphones.some((device) => device.deviceId === microphoneId)
+                  && <option value={microphoneId}>Selected microphone disconnected</option>}
+                {microphones.map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label}</option>)}
+              </select>
+            </label>
+            {microphones.length === 0 && <button type="button" onClick={() => { void handleCheckMicrophones(); }} disabled={recorderState !== 'ready' || checkingMicrophones}>
+              {checkingMicrophones ? 'Checking…' : 'Show available microphones'}
+            </button>}
+          </div>}
           <label className="consent-check"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} disabled={recorderState !== 'ready'}/><span>The shopkeeper agrees to this conversation being recorded.</span></label>
         </section>
 
