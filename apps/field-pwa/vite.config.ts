@@ -36,5 +36,10 @@ const apiProxy = {
 export default defineConfig({
   plugins: [react(), offlineShellPlugin()],
   server: { port: 5173, strictPort: true, proxy: apiProxy },
-  preview: { port: 4173, strictPort: true, proxy: apiProxy }
+  preview: {
+    port: 4173,
+    strictPort: true,
+    allowedHosts: ['.trycloudflare.com'],
+    proxy: apiProxy
+  }
 });
