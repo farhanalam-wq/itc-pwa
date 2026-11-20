@@ -27,11 +27,11 @@ type CaptureTranscriptState =
 
 const captureApi = createApiClient({ baseUrl: '/api' });
 
-const syncStateDetails: Record<SyncState, { label: string; detail: string }> = {
-  queued: { label: 'queued', detail: 'Audio is waiting for S3 upload.' },
-  uploading: { label: 'uploading', detail: 'Audio upload is in progress.' },
-  uploaded: { label: 'uploaded', detail: 'Audio upload is complete.' },
-  error: { label: 'error', detail: 'Audio upload failed.' }
+const syncLabels: Record<SyncState, string> = {
+  queued: 'Queued',
+  uploading: 'Uploading',
+  uploaded: 'Synced',
+  error: 'Sync failed'
 };
 
 const analysisStateDetails: Record<AnalysisState, { label: string; detail: string }> = {
@@ -131,7 +131,23 @@ function minutes(seconds: number): string {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
-function Icon({ name }: { name: 'grid' | 'signal' | 'team' | 'list' | 'search' | 'download' | 'print' | 'arrow' | 'close' | 'play' }) {
+// Pick synthetic display details from the recording ID so the names stay stable on refresh.
+const sampleCaptureDetails = [
+  { store: 'Cedar Corner Store', name: 'Anika Rao', location: 'Mysuru' },
+  { store: 'Lakeview Grocers', name: 'Dev Shah', location: 'Pune' },
+  { store: 'Maple Street Market', name: 'Mira Das', location: 'Kochi' },
+  { store: 'Juniper General Store', name: 'Arjun Sen', location: 'Indore' },
+  { store: 'Willow Provision Shop', name: 'Tara Mehta', location: 'Surat' },
+  { store: 'Orchard Mini Mart', name: 'Kabir Gill', location: 'Jaipur' }
+];
+
+function sampleDetailsFor(id: string) {
+  let hash = 0;
+  for (const character of id) hash = Math.imul(hash, 31) + character.charCodeAt(0) | 0;
+  return sampleCaptureDetails[(hash >>> 0) % sampleCaptureDetails.length]!;
+}
+
+function Icon({ name }: { name: 'grid' | 'signal' | 'team' | 'list' | 'search' | 'download' | 'print' | 'arrow' | 'close' | 'play' | 'document' | 'trash' }) {
   const common = { fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
   if (name === 'grid') return <svg viewBox="0 0 24 24" aria-hidden="true" {...common}><rect x="3.5" y="3.5" width="7" height="7" rx="1"/><rect x="13.5" y="3.5" width="7" height="7" rx="1"/><rect x="3.5" y="13.5" width="7" height="7" rx="1"/><rect x="13.5" y="13.5" width="7" height="7" rx="1"/></svg>;
   if (name === 'signal') return <svg viewBox="0 0 24 24" aria-hidden="true" {...common}><path d="M4 18.5V12M10 18.5V6M16 18.5v-9M22 18.5H2"/></svg>;
@@ -141,6 +157,8 @@ function Icon({ name }: { name: 'grid' | 'signal' | 'team' | 'list' | 'search' |
   if (name === 'download') return <svg viewBox="0 0 24 24" aria-hidden="true" {...common}><path d="M12 3v12m0 0 4.5-4.5M12 15l-4.5-4.5M4 20h16"/></svg>;
   if (name === 'print') return <svg viewBox="0 0 24 24" aria-hidden="true" {...common}><path d="M7 8V4h10v4M7 17H5a2 2 0 0 1-2-2v-4a3 3 0 0 1 3-3h12a3 3 0 0 1 3 3v4a2 2 0 0 1-2 2h-2M7 14h10v6H7z"/><path d="M17 11h.01"/></svg>;
   if (name === 'arrow') return <svg viewBox="0 0 24 24" aria-hidden="true" {...common}><path d="M5 12h13m-5-5 5 5-5 5"/></svg>;
+  if (name === 'trash') return <svg viewBox="0 0 24 24" aria-hidden="true" {...common}><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 10v7m4-7v7"/></svg>;
+  if (name === 'document') return <svg viewBox="0 0 24 24" aria-hidden="true" {...common}><path d="M6 3.5h8l4 4v13H6zM14 3.5V8h4M9 12h6m-6 4h6"/></svg>;
   if (name === 'close') return <svg viewBox="0 0 24 24" aria-hidden="true" {...common}><path d="m6 6 12 12M18 6 6 18"/></svg>;
   return <svg viewBox="0 0 24 24" aria-hidden="true" {...common}><path d="m8 5 11 7-11 7z"/></svg>;
 }
@@ -329,6 +347,9 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
   const [captureRefreshing, setCaptureRefreshing] = useState(false);
   const [activeCaptureAudio, setActiveCaptureAudio] = useState<{ id: string; url: string } | null>(null);
   const [captureAudioLoading, setCaptureAudioLoading] = useState<string | null>(null);
+  const [deletingCapture, setDeletingCapture] = useState<string | null>(null);
+  const [captureDeleteNotice, setCaptureDeleteNotice] = useState<{ error: boolean; text: string } | null>(null);
+  const deletedCaptureIds = useRef(new Set<string>());
   const [capturePlaybackError, setCapturePlaybackError] = useState<string | null>(null);
   const [captureTranscriptStates, setCaptureTranscriptStates] = useState<Record<string, CaptureTranscriptState>>({});
   const [selectedCaptureTranscriptId, setSelectedCaptureTranscriptId] = useState<string | null>(null);
@@ -352,7 +373,7 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
         captureApi.listRecordings({ limit: 100 }),
         captureApi.listTranscripts()
       ]);
-      setFieldCaptures(page.recordings);
+      setFieldCaptures(page.recordings.filter((recording) => !deletedCaptureIds.current.has(recording.id)));
       setFieldCaptureTotal(page.total);
       setCaptureRuntime(health.runtime);
       setCaptureApiState('available');
@@ -408,12 +429,12 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
   const territories = useMemo(() => [...new Set([
     ...demoConversations.map((item) => item.territoryName ?? item.territoryId),
     ...manualTranscripts.map((item) => item.territoryName ?? item.territoryId),
-    ...fieldCaptures.map((item) => item.territoryId)
+    ...fieldCaptures.flatMap((item) => item.territoryId ? [item.territoryId] : [])
   ])].sort(), [fieldCaptures, manualTranscripts]);
   const representatives = useMemo(() => [...new Set([
     ...demoConversations.map((item) => item.representativeName ?? item.representativeId),
     ...manualTranscripts.map((item) => item.representativeName ?? item.representativeId),
-    ...fieldCaptures.map((item) => item.representativeId)
+    ...fieldCaptures.flatMap((item) => item.representativeId ? [item.representativeId] : [])
   ])].sort(), [fieldCaptures, manualTranscripts]);
   const reportAsOfDate = [new Date().toISOString().slice(0, 10), demoAsOfDate].sort().at(-1)!;
   const filteredFieldCaptures = useMemo(() => {
@@ -423,7 +444,7 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
       if (Date.parse(item.startedAt) < cutoff) return false;
       if (territory !== 'all' && item.territoryId !== territory) return false;
       if (representative !== 'all' && item.representativeId !== representative) return false;
-      if (query && !`${item.outletName} ${item.representativeId} ${item.territoryId} ${item.id}`.toLowerCase().includes(query)) return false;
+      if (query && ![item.outletName || 'Field recording', item.representativeId, item.territoryId, item.id].filter(Boolean).join(' ').toLowerCase().includes(query)) return false;
       return true;
     });
   }, [fieldCaptures, period, territory, representative, search]);
@@ -843,12 +864,12 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
       {captureApiState === 'available' && !recent.length && <p className="live-capture-empty">{fieldCaptures.length ? 'No real captures match the selected period, territory, representative, or search.' : 'No real recording has arrived yet. Record and upload one from the Field PWA to hear it here.'}</p>}
       {capturePlaybackError && <p className="live-capture-error" role="alert">{capturePlaybackError}</p>}
       {recent.map((recording) => <article className="live-capture-row" key={recording.id}>
-        <div className="live-capture-identity"><strong>{recording.outletName}</strong><span>{recording.representativeId} · {recording.territoryId}</span></div>
-        <div className="live-capture-meta"><time dateTime={recording.startedAt}>{formatDateTime(recording.startedAt)}</time><span>{formatDuration(Math.round(recording.durationSeconds))}</span><span>{syncStateDetails[recording.syncState].label}</span></div>
+        <div className="live-capture-identity"><strong>{recording.outletName || 'Field recording'}</strong><span>{[recording.representativeId, recording.territoryId].filter(Boolean).join(' · ')}</span></div>
+        <div className="live-capture-meta"><time dateTime={recording.startedAt}>{formatDateTime(recording.startedAt)}</time><span>{formatDuration(Math.round(recording.durationSeconds))}</span><span>{syncLabels[recording.syncState]}</span></div>
         {recording.syncState === 'uploaded'
           ? <div className="live-capture-actions"><span className={`capture-compact-status analysis-${recording.analysisState}`}>{analysisStateDetails[recording.analysisState].label}</span><button className="live-audio-button" type="button" onClick={() => void toggleCaptureAudio(recording.id)} disabled={captureAudioLoading === recording.id}>{captureAudioLoading === recording.id ? 'Loading…' : activeCaptureAudio?.id === recording.id ? 'Close audio' : 'Listen to audio'}</button><button className="live-transcript-button" type="button" aria-expanded={selectedCaptureTranscriptId === recording.id} aria-controls={`recording-transcript-${recording.id}`} onClick={() => toggleCaptureTranscript(recording.id)}>{selectedCaptureTranscriptId === recording.id ? 'Hide transcript' : hasCompletedCaptureTranscript(recording.id) ? 'View transcript' : 'Transcript status'}</button></div>
           : <span className={`live-upload-state sync-${recording.syncState}`}>{recording.syncState === 'queued' ? 'Waiting for upload' : recording.syncState === 'uploading' ? 'Uploading' : 'Upload needs attention'}</span>}
-        {activeCaptureAudio?.id === recording.id && <audio className="live-capture-player" controls preload="none" src={activeCaptureAudio.url} aria-label={`Uploaded recording from ${recording.outletName}`}/>}
+        {activeCaptureAudio?.id === recording.id && <audio className="live-capture-player" controls preload="none" src={activeCaptureAudio.url} aria-label={`Audio for ${recording.outletName || 'field recording'}, ${formatDateTime(recording.startedAt)}`}/>}
         <div id={`recording-transcript-${recording.id}`} className="live-transcript-slot" hidden={selectedCaptureTranscriptId !== recording.id}>{renderCaptureTranscript(recording.id)}</div>
       </article>)}
     </section>;
@@ -1005,50 +1026,124 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
     </section>;
   }
 
+  async function deleteCapture(recording: RecordingMetadata) {
+    const label = recording.outletName || 'Field recording';
+    const recorded = formatDateTime(recording.startedAt);
+    if (!window.confirm(`Delete ${label} from ${recorded}? This removes the server audio and transcript. Any copy on the recording device stays there.`)) return;
+
+    setDeletingCapture(recording.id);
+    setCaptureDeleteNotice(null);
+    try {
+      await captureApi.deleteRecording(recording.id);
+      deletedCaptureIds.current.add(recording.id);
+      setFieldCaptures((current) => current.filter((item) => item.id !== recording.id));
+      setFieldCaptureTotal((count) => Math.max(0, count - 1));
+      setActiveCaptureAudio((current) => current?.id === recording.id ? null : current);
+      setSelectedCaptureTranscriptId((current) => current === recording.id ? null : current);
+      setCaptureTranscriptStates((current) => {
+        const next = { ...current };
+        delete next[recording.id];
+        return next;
+      });
+      setCaptureDeleteNotice({ error: false, text: 'Recording deleted.' });
+    } catch (error) {
+      setCaptureDeleteNotice({ error: true, text: error instanceof Error ? error.message : 'Could not delete the recording.' });
+    } finally {
+      setDeletingCapture(null);
+    }
+  }
+
   function renderFieldPwaCaptures() {
     return <section className="field-pwa-captures" aria-labelledby="field-pwa-captures-title" aria-busy={captureRefreshing}>
       <div className="field-pwa-header">
-        <div><h2 id="field-pwa-captures-title">Field PWA captures</h2><p>Real recording metadata, uploaded audio, and transcripts from the stored conversation. These recordings stay separate from seeded synthetic reports.</p></div>
-        <div className="field-pwa-actions">
-          <span className={`field-pwa-api-status ${captureApiState}`} role="status" aria-live="polite"><i aria-hidden="true"/>{captureApiState === 'loading' ? 'Connecting to API' : captureApiState === 'available' ? 'API connected' : 'API unavailable'}</span>
-          <button className="button" type="button" onClick={() => void refreshFieldCaptures()} disabled={captureRefreshing}>{captureRefreshing ? 'Refreshing…' : 'Refresh'}</button>
-        </div>
+        <h2 id="field-pwa-captures-title">Field recordings</h2>
+        <button className="button" type="button" onClick={() => void refreshFieldCaptures()} disabled={captureRefreshing}>
+          {captureRefreshing ? 'Refreshing…' : 'Refresh'}
+        </button>
       </div>
-      <div className="field-pwa-runtime" aria-label="API capabilities">
-        {captureRuntime?.persistence === 'in-memory-demo' && <span>In-memory demo metadata</span>}
-        {captureRuntime?.uploads === 'not-configured' && <span className="field-pwa-upload-unavailable">S3 upload not configured</span>}
-        {captureRuntime?.uploads === 'configured' && <span className="field-pwa-upload-ready">S3 upload configured</span>}
-        {captureRuntime?.analysis === 'not-configured' && <span className="field-pwa-upload-unavailable">OpenAI transcription not configured</span>}
-        {captureRuntime?.analysis === 'configured' && <span className="field-pwa-upload-ready">OpenAI transcription configured</span>}
-        {captureLastUpdated && <span>Last API response {formatDateTime(captureLastUpdated.toISOString())}</span>}
-      </div>
-      {capturePlaybackError && <div className="field-pwa-alert" role="alert">{capturePlaybackError}</div>}
-      {captureApiState === 'unavailable' && <div className="field-pwa-alert" role="alert"><strong>Capture API unavailable.</strong><span>{captureError ?? 'The API could not be reached.'}</span>{captureLastUpdated && <small>Showing the last successful metadata response from {formatDateTime(captureLastUpdated.toISOString())}.</small>}</div>}
-      {captureApiState === 'loading' && fieldCaptures.length === 0 && <div className="field-pwa-loading" role="status"><i/><i/><span>Loading capture metadata…</span></div>}
-      {captureApiState === 'available' && fieldCaptures.length === 0 && <div className="field-pwa-empty"><strong>No Field PWA capture metadata has arrived.</strong><span>Record a consented shop visit in the PWA and bring the device online to sync it here.</span></div>}
-      {fieldCaptures.length > 0 && !filteredFieldCaptures.length && <div className="field-pwa-empty"><strong>No captures match the current filters.</strong><span>Clear territory, representative, date, or search filters to show uploaded and queued recordings.</span></div>}
+      {captureDeleteNotice && <p className={captureDeleteNotice.error ? 'field-pwa-alert' : 'field-pwa-empty'} role={captureDeleteNotice.error ? 'alert' : 'status'}>{captureDeleteNotice.text}</p>}
+      {capturePlaybackError && <p className="field-pwa-alert" role="alert">{capturePlaybackError}</p>}
+      {captureApiState === 'unavailable' && <div className="field-pwa-alert" role="status">
+        <strong>Couldn’t refresh recordings.</strong>
+        <span>{captureError ?? 'The recording service is unavailable.'}</span>
+        {captureLastUpdated && <small>Last updated {formatDateTime(captureLastUpdated.toISOString())}</small>}
+      </div>}
+      {captureApiState === 'loading' && <p className="field-pwa-empty" role="status">Loading recordings…</p>}
+      {captureApiState === 'available' && !filteredFieldCaptures.length && <p className="field-pwa-empty">
+        {fieldCaptures.length ? 'No recordings match these filters.' : 'Recordings appear here after they sync from the Field PWA.'}
+      </p>}
       {filteredFieldCaptures.length > 0 && <>
-        <div className="field-pwa-record-labels" aria-hidden="true"><span>Outlet and route</span><span>Capture details</span><span>API states</span></div>
-        <div className="field-pwa-record-list">
-          {filteredFieldCaptures.map((recording) => {
-            const sync = syncStateDetails[recording.syncState];
-            const analysis = analysisStateDetails[recording.analysisState];
-            return <article className="field-pwa-record" key={recording.id}>
-              <div className="field-pwa-identity"><strong>{recording.outletName}</strong><span>Representative {recording.representativeId}</span><span>Territory {recording.territoryId}</span><small>Recording ID {recording.id}</small></div>
-              <div className="field-pwa-timing"><div><span>Duration</span><strong>{formatDuration(Math.round(recording.durationSeconds))}</strong></div><div><span>PWA start time</span><time dateTime={recording.startedAt}>{formatDateTime(recording.startedAt)}</time></div></div>
-              <div className="field-pwa-state-grid">
-                <div className={`field-pwa-state sync-${recording.syncState}`}><span>Sync state</span><strong>syncState={sync.label}</strong><small>{sync.detail}</small></div>
-                <div className={`field-pwa-state analysis-${recording.analysisState}`}><span>Transcription</span><strong>{analysis.label}</strong><small>{analysis.detail}</small></div>
-              </div>
-              <div className="field-pwa-audio-actions">{recording.syncState === 'uploaded'
-                ? <><button className="live-audio-button" type="button" onClick={() => void toggleCaptureAudio(recording.id)} disabled={captureAudioLoading === recording.id}>{captureAudioLoading === recording.id ? 'Loading audio…' : activeCaptureAudio?.id === recording.id ? 'Close audio' : 'Listen to uploaded audio'}</button><button className="live-transcript-button" type="button" aria-expanded={selectedCaptureTranscriptId === recording.id} aria-controls={`recording-transcript-${recording.id}`} onClick={() => toggleCaptureTranscript(recording.id)}>{selectedCaptureTranscriptId === recording.id ? 'Hide transcript' : hasCompletedCaptureTranscript(recording.id) ? 'View transcript' : 'Check transcript'}</button></>
-                : <span className={`live-upload-state sync-${recording.syncState}`}>{recording.syncState === 'queued' ? 'Audio queued for S3' : recording.syncState === 'uploading' ? 'Audio uploading' : 'Upload needs attention'}</span>}</div>
-              {activeCaptureAudio?.id === recording.id && <audio className="field-pwa-audio-player" controls preload="none" src={activeCaptureAudio.url} aria-label={`Uploaded recording from ${recording.outletName}`}/>}
-              <div id={`recording-transcript-${recording.id}`} className="field-pwa-transcript-slot" hidden={selectedCaptureTranscriptId !== recording.id}>{renderCaptureTranscript(recording.id)}</div>
-            </article>;
-          })}
+        <div className="capture-table-scroll" role="region" aria-label="Field recordings table" tabIndex={0}>
+          <table className="capture-table" aria-labelledby="field-pwa-captures-title">
+            <thead><tr>
+              <th scope="col">Conversation</th>
+              <th scope="col" className="capture-wide-column" aria-sort="descending">Recorded</th>
+              <th scope="col" className="capture-wide-column">Duration</th>
+              <th scope="col" className="capture-wide-column">Sync</th>
+              <th scope="col">Transcript</th>
+              <th scope="col">Actions</th>
+            </tr></thead>
+            {filteredFieldCaptures.map((recording) => {
+              const label = recording.outletName || 'Field recording';
+              const recorded = formatDateTime(recording.startedAt);
+              const context = [recording.representativeId, recording.territoryId].filter(Boolean).join(' · ');
+              const sample = !recording.outletName && !context ? sampleDetailsFor(recording.id) : undefined;
+              const deleting = deletingCapture === recording.id;
+              const audioOpen = activeCaptureAudio?.id === recording.id;
+              const transcriptOpen = selectedCaptureTranscriptId === recording.id;
+              const loadingAudio = captureAudioLoading === recording.id;
+              const uploaded = recording.syncState === 'uploaded';
+              const audioAction = loadingAudio ? 'Loading audio' : audioOpen ? 'Close audio' : 'Listen to audio';
+              const transcriptAction = transcriptOpen ? 'Hide transcript' : 'View transcript';
+              const transcriptId = `recording-transcript-${recording.id}`;
+
+              return <tbody key={recording.id}>
+                <tr>
+                  <th scope="row">
+                    {sample ? <>
+                      {sample.store}
+                      <small>{sample.name} · {sample.location}</small>
+                      <small className="capture-sample-label">Sample details</small>
+                    </> : <>{label}{context && <small>{context}</small>}</>}
+                    <small className="capture-compact-meta">
+                      <time dateTime={recording.startedAt}>{recorded}</time>
+                      <span>{formatDuration(Math.round(recording.durationSeconds))} · {syncLabels[recording.syncState]}</span>
+                    </small>
+                  </th>
+                  <td className="capture-wide-column"><time dateTime={recording.startedAt}>{recorded}</time></td>
+                  <td className="capture-wide-column">{formatDuration(Math.round(recording.durationSeconds))}</td>
+                  <td className="capture-wide-column">{syncLabels[recording.syncState]}</td>
+                  <td><span className={`capture-compact-status analysis-${recording.analysisState}`}>{analysisStateDetails[recording.analysisState].label}</span></td>
+                  <td>
+                    <div className="capture-table-actions">
+                      <button className="icon-button" type="button" title={audioAction}
+                        aria-label={`${audioAction} for ${label}, ${recorded}`} aria-expanded={audioOpen}
+                        disabled={!uploaded || deleting || (captureAudioLoading !== null && !audioOpen)} onClick={() => void toggleCaptureAudio(recording.id)}>
+                        <Icon name={audioOpen ? 'close' : 'play'}/>
+                      </button>
+                      <button className="icon-button" type="button" title={transcriptAction}
+                        aria-label={`${transcriptAction} for ${label}, ${recorded}`} aria-expanded={transcriptOpen}
+                        aria-controls={transcriptOpen ? transcriptId : undefined} disabled={!uploaded || deleting}
+                        onClick={() => toggleCaptureTranscript(recording.id)}>
+                        <Icon name="document"/>
+                      </button>
+                      <button className="icon-button capture-delete" type="button" title={deleting ? 'Deleting recording' : 'Delete recording'}
+                        aria-label={`${deleting ? 'Deleting' : 'Delete'} ${label}, ${recorded}`}
+                        disabled={!uploaded || deletingCapture !== null} onClick={() => void deleteCapture(recording)}>
+                        <Icon name="trash"/>
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+                {(audioOpen || transcriptOpen) && <tr className="capture-table-details"><td colSpan={6}>
+                  {audioOpen && <audio className="field-pwa-audio-player" controls preload="none" src={activeCaptureAudio.url} aria-label={`Audio for ${label}, ${recorded}`}/>}
+                  {transcriptOpen && <div id={transcriptId}>{renderCaptureTranscript(recording.id)}</div>}
+                </td></tr>}
+              </tbody>;
+            })}
+          </table>
         </div>
-        {fieldCaptureTotal > fieldCaptures.length && <p className="field-pwa-pagination-note">Showing up to 100 of {fieldCaptureTotal} API records.</p>}
+        {fieldCaptureTotal > fieldCaptures.length && <p className="field-pwa-pagination-note">Showing up to 100 of {fieldCaptureTotal} recordings.</p>}
       </>}
     </section>;
   }

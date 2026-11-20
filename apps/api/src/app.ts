@@ -72,9 +72,9 @@ const errorSchema = t.Object({
 
 const visitSchema = t.Object({
   id: t.String(),
-  outletName: t.String(),
-  representativeId: t.String(),
-  territoryId: t.String(),
+  outletName: t.Optional(t.String()),
+  representativeId: t.Optional(t.String()),
+  territoryId: t.Optional(t.String()),
   consentRecordedAt: t.String(),
   createdAt: t.String(),
   recordingIds: t.Array(t.String())
@@ -83,9 +83,9 @@ const visitSchema = t.Object({
 const recordingSchema = t.Object({
   id: t.String(),
   outletId: t.Optional(t.String()),
-  outletName: t.String(),
-  representativeId: t.String(),
-  territoryId: t.String(),
+  outletName: t.Optional(t.String()),
+  representativeId: t.Optional(t.String()),
+  territoryId: t.Optional(t.String()),
   startedAt: t.String(),
   durationSeconds: t.Number(),
   mimeType: t.String(),
@@ -130,9 +130,9 @@ const recordingTranscriptSchema = t.Object({
 
 const createVisitBody = t.Object({
   id: t.String({ minLength: 1, maxLength: 128 }),
-  outletName: t.String({ minLength: 1, maxLength: 200 }),
-  representativeId: t.String({ minLength: 1, maxLength: 128 }),
-  territoryId: t.String({ minLength: 1, maxLength: 128 }),
+  outletName: t.Optional(t.String({ minLength: 1, maxLength: 200 })),
+  representativeId: t.Optional(t.String({ minLength: 1, maxLength: 128 })),
+  territoryId: t.Optional(t.String({ minLength: 1, maxLength: 128 })),
   consentRecordedAt: t.String({ format: 'date-time' })
 });
 
@@ -683,6 +683,33 @@ export function createApp(
         const name = error instanceof Error ? error.name : 'UnknownError';
         console.error('Recording finalization failed:', name);
         return status(500, { code: 'audio_finalize_failed', message: 'The API could not persist the finalized conversation audio. The device copy remains queued for retry.' });
+      }
+    })
+    .delete('/v1/recordings/:recordingId', {
+      params: recordingParams,
+      response: { 200: t.Object({ ok: t.Boolean() }), 401: errorSchema, 403: errorSchema, 500: errorSchema, 503: errorSchema }
+    }, async ({ params, request, status }) => {
+      if (!adminAuth) return status(503, unavailableAuth);
+      if (!await hasAdminSession(request)) return status(401, unauthorizedAdmin);
+      if (!isAllowedManagerOrigin(request, managerOrigin)) {
+        return status(403, { code: 'admin_origin_rejected', message: 'The administrator request origin is not allowed.' });
+      }
+
+      const id = params.recordingId;
+      try {
+        const recording = await repository.getRecording(id);
+        if (recording) {
+          if (recording.objectKey && recording.storageDriver) {
+            await recordingStorage.deleteFinal(recording.objectKey, recording.storageDriver);
+          }
+          await localStorage.removeStaged(id, recording.startedAt, recording.mimeType);
+          await repository.deleteRecording(id);
+        }
+        await transcriptionJobs?.delete(id);
+        return { ok: true };
+      } catch (error) {
+        console.error('Recording deletion failed:', error instanceof Error ? error.name : 'UnknownError');
+        return status(500, { code: 'recording_delete_failed', message: 'Could not finish deleting the recording. Try again.' });
       }
     })
     .get('/v1/recordings/:recordingId/download-url', {

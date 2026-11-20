@@ -79,7 +79,7 @@ export class MongoRecordingRepository implements RecordingRepository {
 
     const value: VisitRecord = { ...input, createdAt: new Date().toISOString(), recordingIds: [] };
     try {
-      await this.visits.insertOne(value);
+      await this.visits.insertOne(value, { ignoreUndefined: true });
       return { kind: 'created', value };
     } catch (error) {
       if (!duplicateKey(error)) throw error;
@@ -112,9 +112,9 @@ export class MongoRecordingRepository implements RecordingRepository {
 
     const value: RecordingMetadata = {
       id: input.id,
-      outletName: visit.outletName,
-      representativeId: visit.representativeId,
-      territoryId: visit.territoryId,
+      ...(visit.outletName === undefined ? {} : { outletName: visit.outletName }),
+      ...(visit.representativeId === undefined ? {} : { representativeId: visit.representativeId }),
+      ...(visit.territoryId === undefined ? {} : { territoryId: visit.territoryId }),
       startedAt: input.startedAt,
       durationSeconds: input.durationSeconds,
       mimeType: input.mimeType,
@@ -151,6 +151,11 @@ export class MongoRecordingRepository implements RecordingRepository {
   async getRecording(id: string): Promise<RecordingMetadata | undefined> {
     const found = await this.recordings.findOne({ id, syncState: 'uploaded' });
     return found ? recordingValue(found) : undefined;
+  }
+
+  async deleteRecording(id: string): Promise<void> {
+    await this.pendingUploads.deleteOne({ id });
+    await this.recordings.deleteOne({ id, syncState: 'uploaded' });
   }
 
   async getRecordingVisitId(id: string): Promise<string | undefined> {

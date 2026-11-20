@@ -18,9 +18,9 @@ export type InsightCategory =
 export interface RecordingMetadata {
   id: string;
   outletId?: string;
-  outletName: string;
-  representativeId: string;
-  territoryId: string;
+  outletName?: string;
+  representativeId?: string;
+  territoryId?: string;
   startedAt: string;
   durationSeconds: number;
   mimeType: string;

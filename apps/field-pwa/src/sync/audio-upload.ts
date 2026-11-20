@@ -14,7 +14,7 @@ export interface AudioUploadBatchResult {
 
 export interface ChunkUploadProgress {
   recordingId: string;
-  outletName: string;
+  outletName?: string;
   completedChunks: number;
   totalChunks: number;
   state: 'uploading' | 'complete' | 'error';

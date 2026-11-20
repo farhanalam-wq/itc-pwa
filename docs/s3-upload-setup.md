@@ -39,11 +39,13 @@ field-source/recordings/YYYY/MM/DD/{recording-id}.webm
 
 S3 prefixes act as folders; no empty folder objects need to be created. Keep the bucket private and Block Public Access enabled. Supply credentials to the API through its AWS SDK role/profile/credential chain. Do not put AWS keys in either frontend.
 
-The API role needs `s3:PutObject` and `s3:GetObject` for:
+The API role needs `s3:PutObject`, `s3:GetObject`, and `s3:DeleteObject` for:
 
 ```text
 arn:aws:s3:::vyom-backend-demo/field-source/recordings/*
 ```
+
+Deleting a recording from the manager removes the current S3 object. Bucket versioning and retention policies can preserve older versions.
 
 The field browser uploads to the API, not directly to S3, so this audio flow does not require bucket CORS. The manager gets short-lived playback URLs from the API for S3 recordings. MongoDB stores the storage driver, object key and checksum, not audio bytes or an expiring URL.
 

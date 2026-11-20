@@ -6,9 +6,9 @@ import type {
 
 export interface VisitRecord {
   id: string;
-  outletName: string;
-  representativeId: string;
-  territoryId: string;
+  outletName?: string;
+  representativeId?: string;
+  territoryId?: string;
   consentRecordedAt: string;
   createdAt: string;
   recordingIds: string[];
@@ -16,9 +16,9 @@ export interface VisitRecord {
 
 export interface CreateVisitInput {
   id: string;
-  outletName: string;
-  representativeId: string;
-  territoryId: string;
+  outletName?: string;
+  representativeId?: string;
+  territoryId?: string;
   consentRecordedAt: string;
 }
 
@@ -66,6 +66,7 @@ export interface RecordingRepository {
   createRecording(visitId: string, input: CreateRecordingInput): Promise<CreateRecordingResult<RecordingMetadata>>;
   getUploadRecording(id: string): Promise<RecordingMetadata | undefined>;
   getRecording(id: string): Promise<RecordingMetadata | undefined>;
+  deleteRecording(id: string): Promise<void>;
   getRecordingVisitId(id: string): Promise<string | undefined>;
   getAnalysisStatus(id: string): Promise<Pick<RecordingMetadata, 'id' | 'syncState' | 'analysisState'> | undefined>;
   listRecordings(filters: RecordingFilters): Promise<RecordingPage>;
@@ -140,9 +141,9 @@ export class DemoRecordingRepository implements RecordingRepository {
     const recording: RecordingMetadata = {
       id: input.id,
       outletId: undefined,
-      outletName: visit.outletName,
-      representativeId: visit.representativeId,
-      territoryId: visit.territoryId,
+      ...(visit.outletName === undefined ? {} : { outletName: visit.outletName }),
+      ...(visit.representativeId === undefined ? {} : { representativeId: visit.representativeId }),
+      ...(visit.territoryId === undefined ? {} : { territoryId: visit.territoryId }),
       startedAt: input.startedAt,
       durationSeconds: input.durationSeconds,
       mimeType: input.mimeType,
@@ -163,6 +164,14 @@ export class DemoRecordingRepository implements RecordingRepository {
   async getRecording(id: string): Promise<RecordingMetadata | undefined> {
     const recording = await this.getUploadRecording(id);
     return recording?.syncState === 'uploaded' ? recording : undefined;
+  }
+
+  async deleteRecording(id: string): Promise<void> {
+    const visitId = this.visitByRecordingId.get(id);
+    const visit = visitId ? this.visits.get(visitId) : undefined;
+    if (visit) visit.recordingIds = visit.recordingIds.filter((recordingId) => recordingId !== id);
+    this.visitByRecordingId.delete(id);
+    this.recordings.delete(id);
   }
 
   async getRecordingVisitId(id: string): Promise<string | undefined> {

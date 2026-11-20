@@ -85,12 +85,12 @@ function MetadataState({ recording }: { recording: LocalRecording }) {
     </span>;
   }
   if (recording.metadataRegistrationState === 'registering') {
-    return <span className="metadata-state">Linking visit details</span>;
+    return <span className="metadata-state">Registering recording</span>;
   }
-  return <span className="metadata-state">Visit details queued</span>;
+  return <span className="metadata-state">Waiting to sync</span>;
 }
 
-function StorageBreakdown({ snapshot }: { snapshot: StorageSnapshot | null }) {
+function StorageBreakdown({ snapshot, onProtect }: { snapshot: StorageSnapshot | null; onProtect?: () => void }) {
   if (!snapshot || snapshot.quota === undefined || snapshot.usage === undefined) {
     return <section className="storage-breakdown" aria-labelledby="storage-title">
       <div className="storage-heading"><h2 id="storage-title">Device storage</h2><span>Browser estimate unavailable</span></div>
@@ -115,6 +115,7 @@ function StorageBreakdown({ snapshot }: { snapshot: StorageSnapshot | null }) {
       <div><i className="storage-swatch other"/><span>Other site data</span><strong>{formatStorageBytes(otherAppData)}</strong></div>
       <div><i className="storage-swatch free"/><span>Available origin quota</span><strong>{formatStorageBytes(available)}</strong></div>
     </div>
+    {onProtect && !snapshot.persistent && <button type="button" className="storage-prompt" onClick={onProtect}>Protect local audio</button>}
     <p className="storage-scope">{formatStorageBytes(used)} occupied of {formatStorageBytes(quota)} estimated origin storage. This quota is per browser origin and may change; it is not the laptop, phone, or tablet’s total disk space.</p>
   </section>;
 }
@@ -136,6 +137,7 @@ function RecordingRow({
   storageDriver?: 'local' | 's3';
   onRetry: (recording: LocalRecording) => void;
 }) {
+  const label = recording.outletName || 'Field recording';
   const localOnly = recording.syncState !== 'uploaded';
   const destination = storageDriver === 's3' ? 'S3' : storageDriver === 'local' ? 'API server' : 'server';
   const uploadStatus = recording.syncState === 'uploaded' ? `Stored on ${destination}`
@@ -144,15 +146,15 @@ function RecordingRow({
         : storageAvailable ? `Queued for ${destination}` : 'Storage service unavailable';
   return <article className="recording-row">
     <div className="row-main">
-      <div className="row-title"><strong>{recording.outletName}</strong><span>{recording.localState === 'incomplete' ? 'Incomplete' : 'On this phone'}</span></div>
+      <div className="row-title"><strong>{label}</strong><span>{recording.localState === 'incomplete' ? 'Incomplete' : 'On this phone'}</span></div>
       <div className="row-meta"><time dateTime={recording.startedAt}>{formatDateTime(recording.startedAt)}</time><span>{formatElapsed(recording.durationSeconds).slice(1).join(':')}</span><span>{formatBytes(recording.byteLength)}</span></div>
       <div className="row-states"><span className={localOnly ? 'audio-state local' : 'audio-state uploaded'} title={recording.lastSyncError}>{uploadStatus}</span><MetadataState recording={recording}/></div>
       {recording.localState === 'incomplete' && recording.incompleteReason && <p className="row-warning">{recording.incompleteReason}</p>}
       {recording.metadataRegistrationState === 'error' && recording.metadataRegistrationRetryable === false && recording.metadataRegistrationError && <p className="row-warning">{recording.metadataRegistrationError}</p>}
       {recording.syncState === 'error' && storageAvailable && <button className="retry-upload" type="button" onClick={() => onRetry(recording)}>Retry upload</button>}
-      {playingId === recording.id && audioUrl && <audio className="audio-player" controls autoPlay src={audioUrl} aria-label={`Local recording from ${recording.outletName}`} onEnded={() => onPlay(recording)}/>}
+      {playingId === recording.id && audioUrl && <audio className="audio-player" controls autoPlay src={audioUrl} aria-label={`Audio for ${label}, ${formatDateTime(recording.startedAt)}`} onEnded={() => onPlay(recording)}/>}
     </div>
-    {recording.byteLength > 0 && <button className="listen-button" type="button" onClick={() => onPlay(recording)} aria-label={`${playingId === recording.id ? 'Close' : 'Play'} local recording from ${recording.outletName}`}>
+    {recording.byteLength > 0 && <button className="listen-button" type="button" onClick={() => onPlay(recording)} aria-label={`${playingId === recording.id ? 'Close' : 'Play'} ${label}, ${formatDateTime(recording.startedAt)}`}>
       <Icon name={playingId === recording.id ? 'close' : 'play'}/>{playingId === recording.id ? 'Close' : 'Listen'}
     </button>}
   </article>;
@@ -166,10 +168,6 @@ function FieldApp() {
   const [recovery, setRecovery] = useState<RecoveryReport | null>(null);
   const [apiHealth, setApiHealth] = useState<Awaited<ReturnType<typeof apiClient.getHealth>> | null>(null);
   const [online, setOnline] = useState(() => typeof navigator === 'undefined' || navigator.onLine);
-  const [outletName, setOutletName] = useState('');
-  const [representativeId, setRepresentativeId] = useState('');
-  const [territoryId, setTerritoryId] = useState('');
-  const [consent, setConsent] = useState(false);
   const [microphones, setMicrophones] = useState<MediaDeviceInfo[]>([]);
   const [microphoneId, setMicrophoneId] = useState('');
   const [checkingMicrophones, setCheckingMicrophones] = useState(false);
@@ -197,12 +195,7 @@ function FieldApp() {
   const audioUrlRef = useRef<string | null>(null);
 
   const canStart = support.supported
-    && Boolean(outletName.trim() && representativeId.trim() && territoryId.trim())
-    && consent
     && recorderState === 'ready' && !checkingMicrophones;
-  const queueCount = useMemo(() => records.filter((record) => record.localState === 'ready'
-    && (record.syncState === 'queued' || record.syncState === 'uploading'
-      || (record.syncState === 'error' && record.uploadRetryable !== false))).length, [records]);
   const orderedRecords = useMemo(() => [...records].sort((a, b) => b.startedAt.localeCompare(a.startedAt)), [records]);
   const displayRecords = orderedRecords.filter((record) => record.localState !== 'recording');
   const [hours, minutes, seconds] = formatElapsed(elapsed);
@@ -382,14 +375,6 @@ function FieldApp() {
       setNotice({ kind: 'error', text: support.reason ?? 'This browser cannot save recordings to durable local storage.' });
       return;
     }
-    if (!consent) {
-      setNotice({ kind: 'error', text: 'Confirm the shopkeeper’s consent before recording.' });
-      return;
-    }
-    if (!outletName.trim() || !representativeId.trim() || !territoryId.trim()) {
-      setNotice({ kind: 'error', text: 'Add the outlet, representative, and territory before starting.' });
-      return;
-    }
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
       setNotice({ kind: 'error', text: 'This browser does not support microphone recording. Open the installed PWA in a current browser.' });
       return;
@@ -408,9 +393,6 @@ function FieldApp() {
       if (!mimeType) throw new Error('The browser did not report its recording format. Try a current browser.');
       const startedAt = new Date().toISOString();
       const writer = await recordingStore.create({
-        outletName: outletName.trim(),
-        representativeId: representativeId.trim(),
-        territoryId: territoryId.trim(),
         mimeType,
         consentRecordedAt: startedAt,
         startedAt
@@ -472,48 +454,28 @@ function FieldApp() {
     stopMeter();
     setRecorderState('stopping');
 
+    let saved = false;
     try {
       if (writeErrorRef.current) throw new Error(writeErrorRef.current);
-      const saved = await writer.finalize(durationSeconds);
-      writerRef.current = null;
-      if (saved.byteLength === 0) {
-        await recordingStore.delete(saved.id);
-        setNotice({ kind: 'error', text: 'No audio was captured. Check microphone permission and record the visit again.' });
-        setRecorderState('ready');
-        await refreshLocalState();
-        return;
-      }
-      setNotice({ kind: 'success', text: online
-        ? storageAvailable ? `Audio saved on this device. Visit details are linking and sync to ${storageDestination} is starting.` : 'Audio saved on this device. The recording service has not confirmed a storage destination yet.'
-        : 'Audio saved on this device. Visit details and audio will sync when the connection returns.' });
-      setRecorderState('ready');
-      await refreshLocalState();
-      if (navigator.onLine) {
-        const result = await syncRef.current?.process();
-        if (result?.failures.length) {
-          setNotice({ kind: 'info', text: 'Audio is safe on this phone. Manager visit details will retry when the API is reachable.' });
-        } else {
-          const current = await recordingStore.get(saved.id);
-          if (current?.syncState === 'uploaded') {
-            setNotice({ kind: 'success', text: `Recording stored on ${storageDestination}. The local copy stays available in history.` });
-          } else if (current?.syncState === 'error') {
-            setNotice({ kind: 'info', text: `Recording is safe on this device. Upload needs a retry: ${current.lastSyncError ?? 'check the API and storage configuration.'}` });
-          }
-        }
-        await refreshApiHealth();
-        await refreshLocalState();
+      const recording = await writer.finalize(durationSeconds);
+      if (recording.byteLength === 0) {
+        await recordingStore.delete(recording.id);
+        setNotice({ kind: 'error', text: 'No audio was captured. Check microphone permission and try again.' });
+      } else {
+        saved = true;
+        setNotice({ kind: 'success', text: 'Recording saved on this phone. Find it in History.' });
       }
     } catch (error) {
       await recordingStore.recoverInterrupted().catch(() => undefined);
-      setNotice({ kind: 'error', text: `The recording could not be finalized. Any saved audio remains on this phone for review. ${error instanceof Error ? error.message : ''}`.trim() });
-      setRecorderState('ready');
-      await refreshLocalState();
+      setNotice({ kind: 'error', text: `Could not save the recording. Check History for any recovered audio. ${error instanceof Error ? error.message : ''}`.trim() });
     } finally {
       recorderRef.current = null;
       writerRef.current = null;
       pausedAtRef.current = 0;
-      void refreshApiHealth();
+      setRecorderState('ready');
+      void refreshLocalState();
     }
+    if (saved && navigator.onLine) void syncRef.current?.process().catch(() => undefined);
   }
 
   function handlePause() {
@@ -575,15 +537,7 @@ function FieldApp() {
     }
   }
 
-  const statusTitle = !support.supported ? 'LOCAL STORAGE UNAVAILABLE'
-    : !online ? 'OFFLINE · READY TO RECORD'
-      : 'READY TO RECORD';
-  const statusDetail = !support.supported ? support.reason
-    : isPersistent ? 'Recordings are protected in this device’s private storage'
-      : 'Capture works offline after this PWA is installed and opened once';
-  const connectionLabel = !online ? 'Offline · local save'
-    : apiHealth ? 'Manager API online'
-      : 'Manager API unavailable';
+  const connectionLabel = !online ? 'Offline' : apiHealth ? 'Online' : 'Sync unavailable';
   const storageDriver = apiHealth?.runtime.storageDriver;
   const storageAvailable = storageDriver === 'local' || storageDriver === 's3';
   const storageDestination = storageDriver === 's3' ? 'S3' : storageDriver === 'local' ? 'the API server' : 'the configured server storage';
@@ -600,23 +554,13 @@ function FieldApp() {
     </header>
 
     <main className="field-main">
+      {notice && <div className={`notice notice-${notice.kind}`} role={notice.kind === 'error' ? 'alert' : 'status'} aria-live={notice.kind === 'error' ? 'assertive' : 'polite'}>{notice.text}<button type="button" aria-label="Dismiss message" onClick={() => setNotice(null)}><Icon name="close"/></button></div>}
+      {storageError && <div className="notice notice-error" role="alert">{storageError}</div>}
+      {storage?.quota && storage.quota - (storage.usage ?? 0) < 50_000_000 && <div className="storage-warning" role="status">Local storage is getting low. Free space before recording another long visit.</div>}
       {screen === 'capture' ? <>
-        <section className="readiness" aria-label="Recording readiness and upload status">
-          <Icon name="shield"/>
-          <div className="readiness-copy"><strong>{statusTitle}</strong><small>{statusDetail}</small></div>
-          <span className={`queue-count ${queueCount ? 'has-queue' : ''}`}>{queueCount} local</span>
-        </section>
-
-        <StorageBreakdown snapshot={storage}/>
-
-        <div className="visit-heading"><div><h1>New recording</h1><p>{outletName.trim() || 'Add the shop you’re visiting'}{territoryId.trim() ? ` · ${territoryId.trim()}` : ''}</p></div><button className="history-link" type="button" onClick={() => setScreen('history')}><Icon name="history"/>History</button></div>
-
-        <section className="visit-context" aria-label="Visit details">
-          <label className="outlet-field">Outlet<input value={outletName} onChange={(event) => setOutletName(event.target.value)} placeholder="Shop or outlet name" autoComplete="organization" disabled={recorderState !== 'ready'}/></label>
-          <div className="context-grid">
-            <label>Representative<input value={representativeId} onChange={(event) => setRepresentativeId(event.target.value)} placeholder="Your name or ID" autoComplete="name" disabled={recorderState !== 'ready'}/></label>
-            <label>Territory<input value={territoryId} onChange={(event) => setTerritoryId(event.target.value)} placeholder="Route or area" disabled={recorderState !== 'ready'}/></label>
-          </div>
+        <h1 className="capture-title">Record a conversation</h1>
+        <section className="capture-options" aria-label="Recording setup">
+          {!support.supported && <p role="alert">{support.reason}</p>}
           {typeof navigator.mediaDevices?.getUserMedia === 'function' && <div className="microphone-field">
             <label>Microphone
               <select value={microphoneId} onChange={(event) => setMicrophoneId(event.target.value)} disabled={recorderState !== 'ready' || checkingMicrophones}>
@@ -626,57 +570,52 @@ function FieldApp() {
                 {microphones.map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label}</option>)}
               </select>
             </label>
-            {microphones.length === 0 && <button type="button" onClick={() => { void handleCheckMicrophones(); }} disabled={recorderState !== 'ready' || checkingMicrophones}>
+            <button type="button" onClick={() => { void handleCheckMicrophones(); }} disabled={recorderState !== 'ready' || checkingMicrophones}>
               {checkingMicrophones ? 'Checking…' : 'Show available microphones'}
-            </button>}
+            </button>
           </div>}
-          <label className="consent-check"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} disabled={recorderState !== 'ready'}/><span>The shopkeeper agrees to this conversation being recorded.</span></label>
+
         </section>
 
         <section className={`recorder-panel ${recorderState === 'recording' ? 'is-recording' : ''} ${recorderState === 'paused' ? 'is-paused' : ''}`} aria-label="Recording controls">
-          <div className="recorder-head"><span className="session-label">ON-DEVICE SESSION</span><span className={`recorder-state state-${recorderState}`}><i/>{recorderState === 'starting' ? 'Starting' : recorderState === 'recording' ? 'Recording' : recorderState === 'paused' ? 'Paused' : recorderState === 'stopping' ? 'Saving' : 'Ready'}</span></div>
+          <div className="recorder-head"><span className={`recorder-state state-${recorderState}`} role="status"><i/>{recorderState === 'starting' ? 'Starting' : recorderState === 'recording' ? 'Recording' : recorderState === 'paused' ? 'Paused' : recorderState === 'stopping' ? 'Saving' : 'Ready'}</span></div>
           <div className="timer" aria-label={`Elapsed time ${hours}:${minutes}:${seconds}`}><span className="timer-tile">{hours}</span><span className="timer-separator">:</span><span className="timer-tile">{minutes}</span><span className="timer-separator">:</span><span className="timer-tile">{seconds}</span></div>
           <div className="level-meter" aria-label={recorderState === 'recording' ? 'Microphone audio level' : 'Audio level meter'}>
             {meterLevels.map((level, index) => <i key={index} style={{ height: `${Math.round(level * 34)}px` }}/>) }
           </div>
-          <button className="start-button" type="button" onClick={() => { void handleStart(); }} disabled={!canStart}>
-            <Icon name="mic"/>{recorderState === 'starting' ? 'Opening microphone…' : recorderState === 'recording' ? 'Recording in progress' : recorderState === 'paused' ? 'Recording paused' : recorderState === 'stopping' ? 'Saving to this phone…' : 'Start recording'}
-          </button>
-          <div className="transport-controls">
-            {recorderState === 'paused'
-              ? <button type="button" onClick={handleResume}><Icon name="play"/>Resume</button>
-              : <button type="button" onClick={handlePause} disabled={recorderState !== 'recording'}><Icon name="pause"/>Pause</button>}
-            <button type="button" onClick={handleStop} disabled={recorderState !== 'recording' && recorderState !== 'paused'}><Icon name="stop"/>Stop</button>
-          </div>
-          <div className="recorder-foot"><span><Icon name="save"/>Audio saves to this phone</span><span>{uploadLabel}</span></div>
+          {recorderState === 'recording' || recorderState === 'paused' ? (
+            <div className="transport-controls">
+              {recorderState === 'paused'
+                ? <button type="button" onClick={handleResume}><Icon name="play"/>Resume</button>
+                : <button type="button" onClick={handlePause}><Icon name="pause"/>Pause</button>}
+              <button type="button" onClick={handleStop}><Icon name="stop"/>Stop recording</button>
+            </div>
+          ) : (
+            <>
+              {recorderState === 'ready' && <p className="recording-consent" id="recording-consent">Get permission before recording. By tapping Start, you confirm everyone agreed.</p>}
+              <button className="start-button" type="button" onClick={() => { void handleStart(); }} disabled={!canStart} aria-describedby={recorderState === 'ready' ? 'recording-consent' : undefined}>
+                <Icon name="mic"/>{recorderState === 'starting' ? 'Opening microphone…' : recorderState === 'stopping' ? 'Saving…' : 'Start recording'}
+              </button>
+            </>
+          )}
+          <div className="recorder-foot"><span><Icon name="save"/>Audio saves to this phone</span></div>
         </section>
 
-        {notice && <div className={`notice notice-${notice.kind}`} role={notice.kind === 'error' ? 'alert' : 'status'} aria-live={notice.kind === 'error' ? 'assertive' : 'polite'}>{notice.text}<button type="button" aria-label="Dismiss message" onClick={() => setNotice(null)}><Icon name="close"/></button></div>}
-        {storageError && <div className="notice notice-error" role="alert">{storageError}</div>}
-        {storage?.quota && storage.quota - (storage.usage ?? 0) < 50_000_000 && <div className="storage-warning" role="status">Local storage is getting low. Free space before recording another long visit.</div>}
-        {recovery?.items.length ? <div className="recovery-note" role="status"><strong>{recovery.incompleteCount + recovery.missingCount + recovery.unreadableCount} interrupted recording{recovery.items.length === 1 ? '' : 's'} found</strong><span>Saved files remain local and are excluded from upload until reviewed.</span></div> : null}
-
-        <section className="recent-list" aria-label="Recent local recordings">
-          <div className="list-heading"><h2>Recent recordings</h2>{storage && !storage.persistent
-            ? <button className="storage-prompt" type="button" onClick={() => { void handleEnablePersistence(); }}>Protect local audio</button>
-            : <span>{displayRecords.length ? `${displayRecords.length} on this phone` : 'No recordings yet'}</span>}</div>
-          {displayRecords.length ? displayRecords.slice(0, 3).map((recording) => <RecordingRow key={recording.id} recording={recording} playingId={playingId} audioUrl={audioUrl} onPlay={(item) => { void handlePlay(item); }} storageAvailable={storageAvailable} storageDriver={storageDriver} onRetry={(item) => { void handleRetryUpload(item); }}/> )
-            : <p className="empty-history">Stopped recordings appear here with their local-save and manager-link status.</p>}
-        </section>
+        <StorageBreakdown snapshot={storage} onProtect={() => { void handleEnablePersistence(); }}/>
       </> : <section className="history-screen">
-        <div className="history-title"><div><h1>Recording history</h1><p>Audio and visit details saved on this device.</p></div><span className="history-total">{displayRecords.length}</span></div>
+        <div className="history-title"><div><h1>Recording history</h1><p>Audio saved on this phone.</p></div><span className="history-total">{displayRecords.length}</span></div>
         <StorageBreakdown snapshot={storage}/>
         {displayRecords.length ? <div className="full-history">{displayRecords.map((recording) => <RecordingRow key={recording.id} recording={recording} playingId={playingId} audioUrl={audioUrl} onPlay={(item) => { void handlePlay(item); }} storageAvailable={storageAvailable} storageDriver={storageDriver} onRetry={(item) => { void handleRetryUpload(item); }}/>)}</div>
-        : <div className="empty-screen"><span className="empty-icon"><Icon name="history"/></span><h2>No recordings yet</h2><p>Start a consented shop visit. The recording is saved on this device before it syncs to {storageDestination}.</p><button className="text-button" type="button" onClick={() => setScreen('capture')}>Return to capture</button></div>}
+        : <div className="empty-screen"><span className="empty-icon"><Icon name="history"/></span><h2>No recordings yet</h2><p>Start a recording to save it here.</p><button className="text-button" type="button" onClick={() => setScreen('capture')}>Return to capture</button></div>}
         {recovery?.items.length ? <div className="recovery-note"><strong>Interrupted captures</strong>{recovery.items.map((item) => <p key={item.id}>{item.message}</p>)}</div> : null}
         <div className="history-footnote"><strong>Media upload</strong><span>{storageAvailable ? `Audio syncs to ${storageDestination} after the device comes online; one local OPFS copy stays on this device.` : `${uploadLabel}. Recordings stay in OPFS until the API is reachable.`}</span><strong>Conversation analysis</strong><span>{apiHealth?.runtime.analysis === 'not-configured' ? 'Transcription is not configured.' : 'Transcription status appears after audio is stored.'}</span></div>
       </section>}
     </main>
 
-    {chunkQueue.length > 0 && <section className="chunk-upload-queue" aria-label="Audio upload chunks" aria-live="polite">
+    {screen === 'history' && chunkQueue.length > 0 && <section className="chunk-upload-queue" aria-label="Audio upload chunks" aria-live="polite">
       <div className="chunk-queue-heading"><strong>Sending recording data</strong><span>{chunkQueue.some((item) => item.state === 'uploading') ? `Transport chunks · final file goes to ${storageDestination}` : 'Recent transfers'}</span></div>
       {chunkQueue.map((item) => <div className="chunk-queue-row" key={item.recordingId}>
-        <span className="chunk-queue-name">{item.outletName}</span>
+        <span className="chunk-queue-name">{item.outletName || 'Field recording'}</span>
         <div className="chunk-queue-segments" aria-label={`${item.completedChunks} of ${item.totalChunks} chunks uploaded`}>
           {Array.from({ length: item.totalChunks }, (_, index) => <i key={index} className={index < item.completedChunks ? 'sent' : item.state === 'error' && index === item.completedChunks ? 'failed' : ''}/>) }
         </div>
@@ -687,7 +626,7 @@ function FieldApp() {
       <button type="button" className={screen === 'capture' ? 'active' : ''} aria-current={screen === 'capture' ? 'page' : undefined} onClick={() => setScreen('capture')}><Icon name="record"/>Record</button>
       <button type="button" className={screen === 'history' ? 'active' : ''} aria-current={screen === 'history' ? 'page' : undefined} onClick={() => setScreen('history')}><Icon name="history"/>History</button>
     </nav>
-    <footer className="truth-footer"><span>{uploadLabel}</span><span>{apiHealth?.runtime.analysis === 'not-configured' ? 'Transcription unavailable' : 'Analysis follows upload'}</span></footer>
+    {screen === 'history' && <footer className="truth-footer"><span>{uploadLabel}</span><span>{apiHealth?.runtime.analysis === 'not-configured' ? 'Transcription unavailable' : 'Analysis follows upload'}</span></footer>}
   </div>;
 }
 

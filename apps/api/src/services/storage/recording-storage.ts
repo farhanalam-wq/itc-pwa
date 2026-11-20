@@ -1,7 +1,7 @@
-import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { LocalRecordingStorage } from '../local-recording-storage';
 import type { StorageConfig } from './config';
@@ -26,6 +26,7 @@ export interface RecordingObjectStorage {
   readonly driver: 'local' | 's3';
   putFinal(input: FinalRecordingInput): Promise<StoredRecordingObject>;
   readFinal(objectKey: string, driver?: 'local' | 's3'): Promise<Uint8Array>;
+  deleteFinal(objectKey: string, driver: 'local' | 's3'): Promise<void>;
   createDownloadUrl(objectKey: string): Promise<{ url: string; expiresAt: string }>;
 }
 
@@ -87,13 +88,21 @@ class LocalObjectStorage implements RecordingObjectStorage {
   }
 
   async readFinal(objectKey: string): Promise<Uint8Array> {
+    return readFile(this.localPath(objectKey));
+  }
+
+  async deleteFinal(objectKey: string): Promise<void> {
+    await rm(this.localPath(objectKey), { force: true });
+  }
+
+  private localPath(objectKey: string): string {
     const relativeKey = this.localRelativeKey(objectKey);
     const absolute = resolve(this.config.localRecordingDir, relativeKey);
     const relativePath = relative(this.config.localRecordingDir, absolute);
     if (!relativePath || relativePath.startsWith('..') || isAbsolute(relativePath)) {
       throw new RecordingStorageError('Recording object key is outside the local storage directory.');
     }
-    return readFile(absolute);
+    return absolute;
   }
 
   async createDownloadUrl(objectKey: string): Promise<{ url: string; expiresAt: string }> {
@@ -170,6 +179,10 @@ class S3ObjectStorage implements RecordingObjectStorage {
     return new Uint8Array(await result.Body.transformToByteArray());
   }
 
+  async deleteFinal(objectKey: string): Promise<void> {
+    await this.client.send(new DeleteObjectCommand({ Bucket: this.config.s3BucketName, Key: objectKey }));
+  }
+
   async createDownloadUrl(objectKey: string): Promise<{ url: string; expiresAt: string }> {
     const { s3BucketName, presignedUrlTtlSeconds } = this.config;
     if (!s3BucketName) throw new RecordingStorageError('S3 bucket is not configured.');
@@ -195,6 +208,7 @@ export function createRecordingStorage(config: StorageConfig): RecordingObjectSt
     driver: active.driver,
     putFinal: (input) => active.putFinal(input),
     readFinal: (objectKey, driver = active.driver) => forDriver(driver).readFinal(objectKey),
+    deleteFinal: (objectKey, driver) => forDriver(driver).deleteFinal(objectKey),
     createDownloadUrl: (objectKey) => forDriver('s3').createDownloadUrl(objectKey)
   };
 }

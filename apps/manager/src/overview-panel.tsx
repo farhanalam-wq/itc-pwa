@@ -15,7 +15,7 @@ export interface OverviewPanelProps {
 const syncLabels: Record<SyncState, string> = {
   queued: 'Waiting for upload',
   uploading: 'Uploading',
-  uploaded: 'Uploaded to S3',
+  uploaded: 'Synced',
   error: 'Upload needs attention'
 };
 
@@ -154,7 +154,7 @@ export function OverviewPanel({
       </div>
       {latestCaptures.length ? <div className="overview-capture-list">
         {latestCaptures.map((capture) => <article className="overview-capture-row" key={capture.id}>
-          <div><strong>{capture.outletName}</strong><span>{capture.representativeId} · {capture.territoryId}</span></div>
+          <div><strong>{capture.outletName || 'Field recording'}</strong><span>{[capture.representativeId, capture.territoryId].filter(Boolean).join(' · ')}</span></div>
           <time dateTime={capture.startedAt}>{formatDateTime(capture.startedAt)}</time>
           <span className={`overview-sync-state sync-${capture.syncState}`}>{syncLabels[capture.syncState]}</span>
           <span className={`overview-analysis-state analysis-${capture.analysisState}`}>{capture.analysisState === 'not_started' ? 'Analysis not started' : capture.analysisState === 'ready' ? 'Analysis ready' : capture.analysisState === 'error' ? 'Analysis failed' : capture.analysisState === 'transcribing' ? 'Transcribing' : 'Analyzing'}</span>

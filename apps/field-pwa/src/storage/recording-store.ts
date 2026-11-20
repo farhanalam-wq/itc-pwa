@@ -22,9 +22,9 @@ export interface StartRecordingInput {
   id?: string;
   visitId?: string;
   outletId?: string;
-  outletName: string;
-  representativeId: string;
-  territoryId: string;
+  outletName?: string;
+  representativeId?: string;
+  territoryId?: string;
   mimeType: string;
   consentRecordedAt: string;
   startedAt?: string;

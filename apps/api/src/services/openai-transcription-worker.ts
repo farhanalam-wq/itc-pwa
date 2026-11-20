@@ -33,7 +33,13 @@ export class OpenAITranscriptionWorker {
     if (!recording || recording.syncState !== 'uploaded' || !recording.objectKey) {
       throw new Error('Only a durably uploaded recording can be queued for transcription.');
     }
-    return this.jobs.enqueue(recordingId, OPENAI_TRANSCRIPTION_MODEL);
+    const job = await this.jobs.enqueue(recordingId, OPENAI_TRANSCRIPTION_MODEL);
+    // A deletion may finish while a transcript request is queueing work.
+    if (!await this.recordings.getRecording(recordingId)) {
+      await this.jobs.delete(recordingId);
+      throw new Error('The recording was deleted before transcription could be queued.');
+    }
+    return job;
   }
 
   async runNext(recordingId?: string): Promise<TranscriptionRunResult> {

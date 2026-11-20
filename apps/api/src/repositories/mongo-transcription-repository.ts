@@ -24,6 +24,7 @@ export interface TranscriptionJobRepository {
   enqueue(recordingId: string, model?: string): Promise<TranscriptionJob>;
   retry(recordingId: string): Promise<TranscriptionJob | undefined>;
   get(recordingId: string): Promise<TranscriptionJob | undefined>;
+  delete(recordingId: string): Promise<void>;
   claimNext(recordingId?: string, now?: Date): Promise<TranscriptionJob | undefined>;
   markCompleted(input: {
     recordingId: string;
@@ -115,6 +116,10 @@ export class MongoTranscriptionRepository {
   async get(recordingId: string): Promise<TranscriptionJob | undefined> {
     const job = await this.jobs.findOne({ recordingId });
     return job ? jobValue(job) : undefined;
+  }
+
+  async delete(recordingId: string): Promise<void> {
+    await this.jobs.deleteOne({ recordingId });
   }
 
   /**

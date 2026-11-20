@@ -55,9 +55,9 @@ export type ApiHealthResponse = HealthResponse & { runtime: ApiRuntimeHealth };
 
 export interface VisitRecord {
   id: string;
-  outletName: string;
-  representativeId: string;
-  territoryId: string;
+  outletName?: string;
+  representativeId?: string;
+  territoryId?: string;
   consentRecordedAt: string;
   createdAt: string;
   recordingIds: string[];
@@ -65,9 +65,9 @@ export interface VisitRecord {
 
 export interface CreateVisitRequest {
   id: string;
-  outletName: string;
-  representativeId: string;
-  territoryId: string;
+  outletName?: string;
+  representativeId?: string;
+  territoryId?: string;
   consentRecordedAt: string;
 }
 
@@ -130,6 +130,7 @@ export interface ApiClient {
   getVisit(visitId: string): Promise<VisitRecord>;
   createVisitRecording(visitId: string, input: CreateRecordingRequest): Promise<RecordingMetadata>;
   getRecording(recordingId: string): Promise<RecordingMetadata>;
+  deleteRecording(recordingId: string): Promise<{ ok: boolean }>;
   getRecordingTranscript(recordingId: string): Promise<RecordingTranscript>;
   retryRecordingTranscription(recordingId: string): Promise<RecordingTranscript>;
   getRecordingSyncStatus(recordingId: string): Promise<RecordingSyncStatus>;
@@ -251,6 +252,10 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
     ),
     getRecording: (recordingId) => request<RecordingMetadata>(
       '/v1/recordings/' + encodeURIComponent(recordingId)
+    ),
+    deleteRecording: (recordingId) => request<{ ok: boolean }>(
+      '/v1/recordings/' + encodeURIComponent(recordingId),
+      { method: 'DELETE' }
     ),
     getRecordingTranscript: (recordingId) => request<RecordingTranscript>(
       '/v1/recordings/' + encodeURIComponent(recordingId) + '/transcript'
