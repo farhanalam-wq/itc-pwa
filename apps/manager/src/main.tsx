@@ -819,9 +819,9 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
             ? <button className="transcript-action" type="button" onClick={() => void retryCaptureTranscript(recordingId)} disabled={captureTranscriptRetrying === recordingId}>{captureTranscriptRetrying === recordingId ? 'Retrying…' : 'Retry transcription'}</button>
             : <small>Ask the API operator to check the transcription configuration or recording format.</small>}</div>}
           {transcript.state === 'completed' && transcript.transcriptText?.trim()
-            ? <p className="capture-transcript-text">{transcript.transcriptText}</p>
+            ? <p className="capture-transcript-text" dir="auto">{transcript.transcriptText}</p>
             : transcript.state === 'completed' ? <p className="capture-transcript-message">No transcript text was returned for this recording.</p> : null}
-          {transcript.state === 'completed' && <small className="capture-transcript-provenance">{transcript.provider} · {transcript.model} · transcript text only; no speaker turns or timings were supplied</small>}
+          {transcript.state === 'completed' && <small className="capture-transcript-provenance">{transcript.provider} · {transcript.model} · No speaker labels or timings supplied</small>}
           {transcriptState.refreshError && <p className="capture-transcript-refresh-error" role="status">Could not refresh transcription status: {transcriptState.refreshError}</p>}
         </>;
       })()}

@@ -20,7 +20,7 @@ Restart the API after changing the key. The API health response reports transcri
 
 ## Processing behavior
 
-- Finalized audio is queued in MongoDB and processed by the API worker using OpenAI's `gpt-transcribe` model.
+- Finalized audio is queued in MongoDB and processed by the API worker using OpenAI's `gpt-transcribe` model. The request lists English, Hindi, and Bangla as possible languages. The prompt asks the model to preserve switches within a sentence and use Latin, Devanagari, and Bengali script respectively. The result still depends on the model's recognition.
 - The transcript job state is `queued`, `processing`, `completed`, or `failed`. Stale processing leases are reclaimed after ten minutes; the API checks the durable queue on startup and every minute.
 - Temporary provider/network failures are retryable. The manager can request a retry through the authenticated recording transcript endpoint after a later UI phase exposes that action.
 - The provider returns plain transcript text and detected language codes when present. This model path does not supply speaker turns, word/segment timestamps, or confidence, so the API does not invent them.

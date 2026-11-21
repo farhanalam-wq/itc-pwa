@@ -4,6 +4,14 @@ import { toFile } from 'openai/uploads';
 export const OPENAI_TRANSCRIPTION_MAX_BYTES = 25_000_000;
 export const OPENAI_TRANSCRIPTION_MODEL = 'gpt-transcribe';
 
+const TRANSCRIPTION_LANGUAGES = ['en', 'hi', 'bn'];
+const NATIVE_SCRIPT_PROMPT = [
+  'This recording may switch between English, Hindi, and Bangla, including within a sentence.',
+  'Transcribe the words as spoken. Preserve every language switch.',
+  'Write English in Latin script, Hindi in Devanagari (हिन्दी), and Bangla in Bengali script (বাংলা).',
+  'Do not translate between languages or transliterate the whole recording into one script.'
+].join(' ');
+
 export interface AudioTranscriptionInput {
   recordingId: string;
   mimeType: string;
@@ -113,7 +121,9 @@ export class OpenAIAudioTranscriptionProvider implements AudioTranscriptionProvi
       const response = await this.client.audio.transcriptions.create({
         file,
         model: OPENAI_TRANSCRIPTION_MODEL,
-        response_format: 'json'
+        response_format: 'json',
+        languages: TRANSCRIPTION_LANGUAGES,
+        prompt: NATIVE_SCRIPT_PROMPT
       });
       return {
         text: response.text,
