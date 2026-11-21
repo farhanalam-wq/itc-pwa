@@ -106,6 +106,11 @@ function formatDuration(seconds: number): string {
   return `${minutes}:${String(remainder).padStart(2, '0')}`;
 }
 
+function formatTurnTimestamp(ms: number): string {
+  const tenths = Math.floor(ms / 100);
+  return `${formatDuration(Math.floor(tenths / 10))}.${tenths % 10}`;
+}
+
 function outcomeLabel(value: DemoConversation['outcome']): string {
   if (value === 'order_placed') return 'Order placed';
   if (value === 'follow_up') return 'Follow-up';
@@ -345,6 +350,9 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
   const [captureError, setCaptureError] = useState<string | null>(null);
   const [captureLastUpdated, setCaptureLastUpdated] = useState<Date | null>(null);
   const [captureRefreshing, setCaptureRefreshing] = useState(false);
+  const capturePlayer = useRef<HTMLAudioElement | null>(null);
+  const pendingCaptureSeek = useRef<{ id: string; seconds: number } | null>(null);
+  const [reprocessError, setReprocessError] = useState<{ id: string; message: string } | null>(null);
   const [activeCaptureAudio, setActiveCaptureAudio] = useState<{ id: string; url: string } | null>(null);
   const [captureAudioLoading, setCaptureAudioLoading] = useState<string | null>(null);
   const [deletingCapture, setDeletingCapture] = useState<string | null>(null);
@@ -747,8 +755,25 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
     if (evidenceVisit) openVisit(evidenceVisit.id);
   }
 
-  async function toggleCaptureAudio(recordingId: string) {
-    if (activeCaptureAudio?.id === recordingId) {
+  function applyCaptureSeek(recordingId: string, player: HTMLAudioElement) {
+    const seek = pendingCaptureSeek.current;
+    if (!seek || seek.id !== recordingId || player.readyState < 1) return;
+    pendingCaptureSeek.current = null;
+    player.currentTime = Math.min(seek.seconds, Number.isFinite(player.duration) ? player.duration : seek.seconds);
+  }
+
+  async function seekCaptureAudio(recordingId: string, startMs: number) {
+    pendingCaptureSeek.current = { id: recordingId, seconds: startMs / 1000 };
+    if (activeCaptureAudio?.id === recordingId && capturePlayer.current) {
+      applyCaptureSeek(recordingId, capturePlayer.current);
+      return;
+    }
+    await toggleCaptureAudio(recordingId, true);
+  }
+
+  async function toggleCaptureAudio(recordingId: string, forSeek = false) {
+    if (!forSeek) pendingCaptureSeek.current = null;
+    if (activeCaptureAudio?.id === recordingId && !forSeek) {
       setActiveCaptureAudio(null);
       return;
     }
@@ -788,6 +813,21 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
     }
   }
 
+  async function reprocessCaptureTranscript(recordingId: string) {
+    if (!window.confirm('Reprocess this recording with speaker labels?')) return;
+    setCaptureTranscriptRetrying(recordingId);
+    setReprocessError(null);
+    try {
+      const transcript = await captureApi.reprocessRecordingTranscription(recordingId);
+      setCaptureTranscriptStates((current) => ({ ...current, [recordingId]: { kind: 'loaded', transcript } }));
+      void refreshFieldCaptures();
+    } catch (error) {
+      setReprocessError({ id: recordingId, message: error instanceof Error ? error.message : 'Could not reprocess the recording.' });
+    } finally {
+      setCaptureTranscriptRetrying(null);
+    }
+  }
+
   function hasCompletedCaptureTranscript(recordingId: string): boolean {
     const transcriptState = captureTranscriptStates[recordingId];
     return transcriptState?.kind === 'loaded' && transcriptState.transcript.state === 'completed';
@@ -806,22 +846,52 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
         const stateLabel: Record<RecordingTranscript['state'], string> = {
           not_started: 'Not started',
           queued: 'Queued',
-          processing: 'Transcribing',
+          processing: transcript.stage === 'diarizing' ? 'Identifying speakers' : 'Transcribing',
           completed: 'Transcript ready',
           failed: 'Transcription failed'
         };
         return <>
           <div className="capture-transcript-status-row"><span className={`capture-transcript-status state-${transcript.state}`}>{stateLabel[transcript.state]}</span>{transcript.state === 'completed' && transcript.languageCodes?.length ? <span>Language: {transcript.languageCodes.join(', ')}</span> : null}</div>
           {transcript.state === 'queued' && <p className="capture-transcript-message" role="status">The stored audio is waiting in the transcription queue.</p>}
-          {transcript.state === 'processing' && <p className="capture-transcript-message" role="status">The stored audio is being transcribed. This panel refreshes while processing continues.</p>}
+          {transcript.state === 'processing' && <p className="capture-transcript-message" role="status">{transcript.stage === 'diarizing' ? 'Finding when each speaker talks.' : 'Converting the recorded audio to text.'}</p>}
           {transcript.state === 'not_started' && <p className="capture-transcript-message" role="status">Transcription has not started yet. Refresh this panel after the audio finishes uploading.</p>}
           {transcript.state === 'failed' && <div className="capture-transcript-message" role="alert"><p>{transcript.errorMessage ?? 'The recording could not be transcribed.'}</p>{transcript.retryable
             ? <button className="transcript-action" type="button" onClick={() => void retryCaptureTranscript(recordingId)} disabled={captureTranscriptRetrying === recordingId}>{captureTranscriptRetrying === recordingId ? 'Retrying…' : 'Retry transcription'}</button>
             : <small>Ask the API operator to check the transcription configuration or recording format.</small>}</div>}
-          {transcript.state === 'completed' && transcript.transcriptText?.trim()
-            ? <p className="capture-transcript-text" dir="auto">{transcript.transcriptText}</p>
-            : transcript.state === 'completed' ? <p className="capture-transcript-message">No transcript text was returned for this recording.</p> : null}
-          {transcript.state === 'completed' && <small className="capture-transcript-provenance">{transcript.provider} · {transcript.model} · No speaker labels or timings supplied</small>}
+          {transcript.state !== 'completed' && transcript.transcriptText?.trim() && <div className="capture-previous-transcript">
+            <strong>Previous transcript</strong>
+            <p className="capture-transcript-text" dir="auto">{transcript.transcriptText}</p>
+          </div>}
+          {transcript.state === 'completed' && <>
+            {transcript.turns?.length ? <ol className="capture-turns">
+              {transcript.turns.map((turn) => {
+                const start = formatTurnTimestamp(turn.startMs);
+                const end = formatTurnTimestamp(turn.endMs);
+                return <li key={turn.id}>
+                  <div className="capture-turn-meta">
+                    <button className="capture-turn-seek" type="button" disabled={captureAudioLoading !== null}
+                      aria-label={`Seek to ${start} for ${turn.speaker}`}
+                      onClick={() => void seekCaptureAudio(recordingId, turn.startMs)}>
+                      {start}–{end}
+                    </button>
+                    <strong>{turn.speaker}</strong>
+                    {turn.overlapsSpeech && <span>Overlapping speech</span>}
+                  </div>
+                  <p className="capture-transcript-text" dir="auto">{turn.text}</p>
+                </li>;
+              })}
+            </ol> : transcript.transcriptText?.trim()
+              ? <p className="capture-transcript-text" dir="auto">{transcript.transcriptText}</p>
+              : <p className="capture-transcript-message">No transcript text was returned for this recording.</p>}
+            <small className="capture-transcript-provenance">{transcript.provider} · {transcript.model}
+              {transcript.turns?.length ? ' · Speaker labels are estimated' : ' · No speaker labels or timings supplied'}
+            </small>
+            {transcript.canReprocess && <button className="transcript-action capture-reprocess" type="button"
+              disabled={captureTranscriptRetrying !== null} onClick={() => void reprocessCaptureTranscript(recordingId)}>
+              {captureTranscriptRetrying === recordingId ? 'Starting…' : 'Reprocess with speakers'}
+            </button>}
+            {reprocessError?.id === recordingId && <p className="capture-transcript-message" role="alert">{reprocessError.message}</p>}
+          </>}
           {transcriptState.refreshError && <p className="capture-transcript-refresh-error" role="status">Could not refresh transcription status: {transcriptState.refreshError}</p>}
         </>;
       })()}
@@ -869,7 +939,7 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
         {recording.syncState === 'uploaded'
           ? <div className="live-capture-actions"><span className={`capture-compact-status analysis-${recording.analysisState}`}>{analysisStateDetails[recording.analysisState].label}</span><button className="live-audio-button" type="button" onClick={() => void toggleCaptureAudio(recording.id)} disabled={captureAudioLoading === recording.id}>{captureAudioLoading === recording.id ? 'Loading…' : activeCaptureAudio?.id === recording.id ? 'Close audio' : 'Listen to audio'}</button><button className="live-transcript-button" type="button" aria-expanded={selectedCaptureTranscriptId === recording.id} aria-controls={`recording-transcript-${recording.id}`} onClick={() => toggleCaptureTranscript(recording.id)}>{selectedCaptureTranscriptId === recording.id ? 'Hide transcript' : hasCompletedCaptureTranscript(recording.id) ? 'View transcript' : 'Transcript status'}</button></div>
           : <span className={`live-upload-state sync-${recording.syncState}`}>{recording.syncState === 'queued' ? 'Waiting for upload' : recording.syncState === 'uploading' ? 'Uploading' : 'Upload needs attention'}</span>}
-        {activeCaptureAudio?.id === recording.id && <audio className="live-capture-player" controls preload="none" src={activeCaptureAudio.url} aria-label={`Audio for ${recording.outletName || 'field recording'}, ${formatDateTime(recording.startedAt)}`}/>}
+        {activeCaptureAudio?.id === recording.id && <audio ref={capturePlayer} className="live-capture-player" controls preload="metadata" onLoadedMetadata={(event) => applyCaptureSeek(recording.id, event.currentTarget)} src={activeCaptureAudio.url} aria-label={`Audio for ${recording.outletName || 'field recording'}, ${formatDateTime(recording.startedAt)}`}/>}
         <div id={`recording-transcript-${recording.id}`} className="live-transcript-slot" hidden={selectedCaptureTranscriptId !== recording.id}>{renderCaptureTranscript(recording.id)}</div>
       </article>)}
     </section>;
@@ -1136,7 +1206,7 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
                   </td>
                 </tr>
                 {(audioOpen || transcriptOpen) && <tr className="capture-table-details"><td colSpan={6}>
-                  {audioOpen && <audio className="field-pwa-audio-player" controls preload="none" src={activeCaptureAudio.url} aria-label={`Audio for ${label}, ${recorded}`}/>}
+                  {audioOpen && <audio ref={capturePlayer} className="field-pwa-audio-player" controls preload="metadata" onLoadedMetadata={(event) => applyCaptureSeek(recording.id, event.currentTarget)} src={activeCaptureAudio.url} aria-label={`Audio for ${label}, ${recorded}`}/>}
                   {transcriptOpen && <div id={transcriptId}>{renderCaptureTranscript(recording.id)}</div>}
                 </td></tr>}
               </tbody>;

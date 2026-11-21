@@ -525,3 +525,13 @@ tbody td { color: #59675e; font-variant-numeric: tabular-nums; }
   .auth-aside > div:nth-child(2) span { font-size: 12px; }
   .auth-aside > small { grid-column: 2; }
 }
+
+.capture-turns { list-style: none; max-width: 78ch; margin: 10px 0; padding: 0; }
+.capture-turns li { padding: 6px 0 10px; border-bottom: 1px solid var(--line); }
+.capture-turn-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; color: #536157; font-size: 12px; }
+.capture-turn-seek { min-height: 44px; border: 0; background: transparent; padding: 0 4px; color: var(--green); font: inherit; font-variant-numeric: tabular-nums; text-decoration: underline; text-underline-offset: 2px; }
+.capture-turn-seek:hover:not(:disabled) { color: #103c29; }
+.capture-turn-seek:disabled { opacity: .65; }
+.capture-turns .capture-transcript-text { margin: 0; }
+.capture-reprocess { display: block; margin-top: 8px; }
+.capture-previous-transcript { margin: 12px 0; padding-top: 8px; border-top: 1px solid var(--line); font-size: 12px; }
