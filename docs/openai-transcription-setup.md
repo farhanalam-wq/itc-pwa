@@ -106,6 +106,10 @@ The default API workflow sends one file to GPT and returns plain text. To opt in
 
 Diarized jobs send decoded audio to Modal once and store the job ID in MongoDB. The API resumes from the saved ID after a restart when Modal still has the result. It stores each completed GPT clip so a retry can skip clips already saved. The transcript only switches to the new result once the job completes. If the mode is disabled while a diarized job is outstanding, re-enable it before retrying that job.
 
-The manager displays elapsed timestamps, anonymous speaker labels, and flags for overlapping speech. Select a timestamp to play from that point in the stored recording. With diarization enabled, an administrator can choose **Reprocess with speaker turns** on a completed transcript. This sends the stored recording through the current diarized path. There is no bulk backfill.
+The manager displays elapsed timestamps, anonymous speaker labels, and flags for overlapping speech. Select a timestamp to play from that point in the stored recording. With diarization enabled, an administrator can choose **Reprocess with speakers** on a completed transcript. This sends the stored recording through the current diarized path. There is no bulk backfill.
 
 Start with synthetic or approved pilot audio. Confirm residency and retention requirements before enabling the flag for a deployment that handles real field audio. The synthetic noise/overlap evaluation still found script mistakes when languages changed within a phrase. Treat the text as a model result and use the source audio to verify it.
+
+### Pipeline verification
+
+On 21 November 2026, a completed synthetic recording was reprocessed through the authenticated API against an isolated MongoDB and the live Modal and GPT services. The API returned nine turns for two voices, with model provenance, and rejected a concurrent reprocess request. A separate restart check confirmed that a reclaimed job kept its Modal ID and completed clip and that the old attempt could not write. The manager was checked in Chromium with a synthetic transcript for keyboard focus, timestamp seeking, overlap labeling, and reprocess feedback.
