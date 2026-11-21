@@ -91,3 +91,11 @@ The staging app runs pyannote Community-1 on a GPU. The Bun prototype decodes th
 For staging acceptance, verify the endpoint rejects unauthenticated requests, compare returned intervals with the local run on the same PCM, and measure first and subsequent requests separately. Use Modal invocation telemetry for actual GPU cost. The prototype reports both elapsed time including polling and inference time from the worker.
 
 Use synthetic audio in staging. Modal stores asynchronous function payloads in the United States. Confirm audio residency and retention requirements before using this transport for field recordings. See [Modal data residency](https://modal.com/docs/guide/data-residency).
+
+### Staging verification, 21 November 2026
+
+The deployed endpoint rejected an unauthenticated request with HTTP 401. With proxy credentials, it returned nine intervals for the 22.7-second, two-voice synthetic recording. The returned intervals matched the local Community-1 run exactly on this recording. A new CLI process retrieved the same completed result by job ID without resubmitting audio.
+
+The initial request took about 270 seconds including queueing and startup, with 1.64 seconds reported by the worker for inference. Subsequent submissions returned in 5–7 seconds including polling, with about 0.37 seconds of inference. Resuming the completed job took under a second. These are individual observations, not a latency guarantee or a measurement of billed cost.
+
+The [synthetic stress evaluation](../apps/api/evaluation/README.md) found both speakers in the expected order with noise and overlap. GPT still made some script and wording errors when languages switched inside an uninterrupted phrase. Keep this path in staging until those quality limits and Modal audio residency have been reviewed.
