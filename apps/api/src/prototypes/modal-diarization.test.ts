@@ -14,6 +14,7 @@ const timeline = {
   audioSha256: createHash('sha256').update(pcm).digest('hex'),
   modelRevision: 'synthetic-revision',
   inferenceMs: 120,
+  gpu: 'synthetic-gpu',
   turns: [],
   overlaps: []
 };
@@ -44,7 +45,7 @@ test('submits once and resumes polling with the same recording', async () => {
   const first = await new ModalDiarizationClient(config, request).run(pcm, {
     onJobId: (id) => { announced = id; }
   });
-  expect(first).toEqual({ jobId, timeline, modelRevision: 'synthetic-revision', inferenceMs: 120 });
+  expect(first).toEqual({ jobId, timeline, modelRevision: 'synthetic-revision', inferenceMs: 120, gpu: 'synthetic-gpu' });
   expect(announced).toBe(jobId);
 
   const resumed = await new ModalDiarizationClient(config, request).run(pcm, { resumeJobId: jobId });

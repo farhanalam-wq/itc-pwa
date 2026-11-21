@@ -71,7 +71,7 @@ def download_model():
 
 @app.cls(
     image=gpu_image,
-    gpu="L4",
+    gpu=["L4", "A10"],
     cpu=2,
     memory=4096,
     max_containers=2,
@@ -90,6 +90,7 @@ class Diarizer:
 
     @modal.method()
     def run(self, pcm: bytes):
+        import torch
         from diarize import diarize_pcm, pcm_duration_ms
 
         started_at = perf_counter()
@@ -100,6 +101,7 @@ class Diarizer:
             "durationMs": pcm_duration_ms(pcm),
             "modelRevision": MODEL_REVISION,
             "inferenceMs": round((perf_counter() - started_at) * 1000),
+            "gpu": torch.cuda.get_device_name(),
         }
 
 

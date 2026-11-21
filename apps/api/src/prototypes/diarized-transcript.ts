@@ -146,6 +146,7 @@ async function main() {
     let modalJobId: string | undefined;
     let modalModelRevision: string | undefined;
     let modalInferenceMs: number | undefined;
+    let modalGpu: string | undefined;
     const diarizationStart = performance.now();
     if (syntheticPath) {
       rawTimeline = await Bun.file(syntheticPath).json();
@@ -157,6 +158,7 @@ async function main() {
       modalJobId = result.jobId;
       modalModelRevision = result.modelRevision;
       modalInferenceMs = result.inferenceMs;
+      modalGpu = result.gpu;
       rawTimeline = result.timeline;
     } else {
       const python = Bun.env.PYANNOTE_PYTHON || 'python3';
@@ -178,6 +180,7 @@ async function main() {
       ...(modalJobId ? { modalJobId } : {}),
       ...(modalModelRevision ? { modalModelRevision } : {}),
       ...(modalInferenceMs !== undefined ? { modalInferenceMs } : {}),
+      ...(modalGpu ? { modalGpu } : {}),
       ...(!syntheticPath ? { diarizationElapsedMs: Math.round(performance.now() - diarizationStart) } : {}),
       speakerIntervals: timeline.turns,
       overlapIntervals: timeline.overlaps

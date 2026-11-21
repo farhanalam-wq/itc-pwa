@@ -15,6 +15,7 @@ interface ModalJobResult {
   timeline: unknown;
   modelRevision?: string;
   inferenceMs?: number;
+  gpu?: string;
 }
 
 type HttpRequest = (url: URL, init: RequestInit) => Promise<Response>;
@@ -91,7 +92,8 @@ export class ModalDiarizationClient {
           timeline: result,
           modelRevision: typeof result.modelRevision === 'string' ? result.modelRevision : undefined,
           inferenceMs: typeof result.inferenceMs === 'number' && Number.isFinite(result.inferenceMs)
-            && result.inferenceMs >= 0 ? result.inferenceMs : undefined
+            && result.inferenceMs >= 0 ? result.inferenceMs : undefined,
+          gpu: typeof result.gpu === 'string' ? result.gpu : undefined
         };
       }
       if (status.state === 'failed') {
