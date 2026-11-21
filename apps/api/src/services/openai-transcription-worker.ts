@@ -7,6 +7,7 @@ import {
   OPENAI_TRANSCRIPTION_MODEL,
   type AudioTranscriptionProvider
 } from './openai-transcription';
+import type { DiarizedTranscriptionPipeline } from './diarized-transcription';
 import type { RecordingObjectStorage } from './storage/recording-storage';
 
 export type TranscriptionRunResult =
@@ -25,15 +26,20 @@ export class OpenAITranscriptionWorker {
     private readonly jobs: TranscriptionJobRepository,
     private readonly recordings: RecordingRepository,
     private readonly storage: RecordingObjectStorage,
-    private readonly provider: AudioTranscriptionProvider
+    private readonly provider: AudioTranscriptionProvider,
+    private readonly diarized?: DiarizedTranscriptionPipeline
   ) {}
+
+  get diarizationEnabled(): boolean {
+    return this.diarized !== undefined;
+  }
 
   async enqueue(recordingId: string): Promise<TranscriptionJob> {
     const recording = await this.recordings.getRecording(recordingId);
     if (!recording || recording.syncState !== 'uploaded' || !recording.objectKey) {
       throw new Error('Only a durably uploaded recording can be queued for transcription.');
     }
-    const job = await this.jobs.enqueue(recordingId, OPENAI_TRANSCRIPTION_MODEL);
+    const job = await this.jobs.enqueue(recordingId, OPENAI_TRANSCRIPTION_MODEL, this.diarizationEnabled ? 'diarized' : undefined);
     // A deletion may finish while a transcript request is queueing work.
     if (!await this.recordings.getRecording(recordingId)) {
       await this.jobs.delete(recordingId);
@@ -50,6 +56,24 @@ export class OpenAITranscriptionWorker {
       return { state: 'not_ready', job: existing };
     }
 
+    const controller = new AbortController();
+    const renew = async (
+      update: Parameters<TranscriptionJobRepository['checkpoint']>[2] = {}
+    ) => {
+      controller.signal.throwIfAborted();
+      if (!await this.jobs.checkpoint(job.recordingId, job.attempts, update)) {
+        controller.abort(new Error('The transcription lease was lost.'));
+        controller.signal.throwIfAborted();
+      }
+    };
+    let renewing = false;
+    const heartbeat = setInterval(() => {
+      if (renewing) return;
+      renewing = true;
+      void renew().catch(() => controller.abort(new Error('Could not renew the transcription lease.')))
+        .finally(() => { renewing = false; });
+    }, 30_000);
+
     try {
       const recording = await this.recordings.getRecording(job.recordingId);
       if (!this.isStored(recording)) {
@@ -65,7 +89,7 @@ export class OpenAITranscriptionWorker {
         return { state: 'failed', job: failed };
       }
 
-      if (recording.analysisState === 'not_started' || recording.analysisState === 'error') {
+      if (recording.analysisState === 'not_started' || recording.analysisState === 'error' || recording.analysisState === 'ready') {
         await this.recordings.transitionAnalysisState(recording.id, 'transcribing');
       }
       if (recording.byteLength > OPENAI_TRANSCRIPTION_MAX_BYTES) {
@@ -81,16 +105,30 @@ export class OpenAITranscriptionWorker {
         return { state: 'failed', job: failed };
       }
 
+      if (job.mode === 'diarized' && !this.diarized) {
+        throw new AudioTranscriptionError('provider_not_configured', 'Speaker diarization is not enabled on this server.', true);
+      }
       const bytes = await this.storage.readFinal(recording.objectKey, recording.storageDriver);
-      const result = await this.provider.transcribe({
+      await renew();
+      const diarized = job.mode === 'diarized'
+        ? await this.diarized!.transcribe({
+          job, bytes, mimeType: recording.mimeType, provider: this.provider, signal: controller.signal,
+          checkpoint: (stage, diarization) => renew({stage, diarization})
+        })
+        : undefined;
+      const result = diarized ?? await this.provider.transcribe({
         recordingId: recording.id,
         mimeType: recording.mimeType,
-        bytes
+        bytes,
+        signal: controller.signal
       });
+      controller.signal.throwIfAborted();
       const completed = await this.jobs.markCompleted({
         recordingId: recording.id,
         attempt: job.attempts,
         transcriptText: result.text,
+        turns: diarized?.turns,
+        diarizer: diarized?.diarizer,
         languageCodes: result.languageCodes,
         model: result.model
       });
@@ -98,6 +136,7 @@ export class OpenAITranscriptionWorker {
       await this.recordings.transitionAnalysisState(recording.id, 'ready');
       return { state: 'completed', job: completed };
     } catch (error) {
+      if (controller.signal.aborted) return { state: 'not_ready' };
       const normalized = error instanceof AudioTranscriptionError
         ? error
         : new AudioTranscriptionError(
@@ -115,6 +154,8 @@ export class OpenAITranscriptionWorker {
       if (!failed) return { state: 'not_ready' };
       await this.recordings.transitionAnalysisState(job.recordingId, 'error');
       return { state: 'failed', job: failed };
+    } finally {
+      clearInterval(heartbeat);
     }
   }
 

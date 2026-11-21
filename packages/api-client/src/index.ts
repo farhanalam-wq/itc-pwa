@@ -131,6 +131,7 @@ export interface ApiClient {
   createVisitRecording(visitId: string, input: CreateRecordingRequest): Promise<RecordingMetadata>;
   getRecording(recordingId: string): Promise<RecordingMetadata>;
   deleteRecording(recordingId: string): Promise<{ ok: boolean }>;
+  reprocessRecordingTranscription(recordingId: string): Promise<RecordingTranscript>;
   getRecordingTranscript(recordingId: string): Promise<RecordingTranscript>;
   retryRecordingTranscription(recordingId: string): Promise<RecordingTranscript>;
   getRecordingSyncStatus(recordingId: string): Promise<RecordingSyncStatus>;
@@ -256,6 +257,10 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
     deleteRecording: (recordingId) => request<{ ok: boolean }>(
       '/v1/recordings/' + encodeURIComponent(recordingId),
       { method: 'DELETE' }
+    ),
+    reprocessRecordingTranscription: (recordingId) => request<RecordingTranscript>(
+      '/v1/recordings/' + encodeURIComponent(recordingId) + '/transcript/reprocess',
+      { method: 'POST' }
     ),
     getRecordingTranscript: (recordingId) => request<RecordingTranscript>(
       '/v1/recordings/' + encodeURIComponent(recordingId) + '/transcript'

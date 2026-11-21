@@ -16,6 +16,7 @@ export interface AudioTranscriptionInput {
   recordingId: string;
   mimeType: string;
   bytes: Uint8Array;
+  signal?: AbortSignal;
 }
 
 export interface AudioTranscriptionResult {
@@ -124,7 +125,7 @@ export class OpenAIAudioTranscriptionProvider implements AudioTranscriptionProvi
         response_format: 'json',
         languages: TRANSCRIPTION_LANGUAGES,
         prompt: NATIVE_SCRIPT_PROMPT
-      });
+      }, { signal: input.signal });
       return {
         text: response.text,
         languageCodes: response.languages?.map((language) => language.code).filter(Boolean) ?? [],

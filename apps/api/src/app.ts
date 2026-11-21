@@ -118,6 +118,17 @@ const recordingTranscriptSchema = t.Object({
   provider: t.Literal('openai'),
   model: t.String(),
   transcriptText: t.Optional(t.String()),
+  turns: t.Optional(t.Array(t.Object({
+    id: t.String(),
+    speaker: t.String(),
+    startMs: t.Integer({ minimum: 0 }),
+    endMs: t.Integer({ minimum: 1 }),
+    text: t.String(),
+    overlapsSpeech: t.Boolean()
+  }))),
+  diarizer: t.Optional(t.Object({ model: t.String(), revision: t.Optional(t.String()) })),
+  stage: t.Optional(t.Union([t.Literal('diarizing'), t.Literal('transcribing')])),
+  canReprocess: t.Optional(t.Boolean()),
   languageCodes: t.Optional(t.Array(t.String())),
   attempts: t.Number(),
   createdAt: t.String({ format: 'date-time' }),
@@ -325,7 +336,13 @@ export function createApp(
   };
   const transcriptFor = async (recordingId: string, recording: RecordingMetadata): Promise<RecordingTranscript> => {
     const job = await transcriptionJobs?.get(recordingId);
-    if (job) return job;
+    if (job) {
+      const { diarization: _checkpoint, mode: _mode, ...transcript } = job;
+      return {
+        ...transcript,
+        canReprocess: job.state === 'completed' && Boolean(transcriptionWorker?.diarizationEnabled)
+      };
+    }
     const createdAt = new Date(recording.startedAt).toISOString();
     return {
       recordingId,
@@ -819,6 +836,7 @@ export function createApp(
       response: {
         200: recordingTranscriptSchema,
         401: errorSchema,
+        403: errorSchema,
         404: errorSchema,
         409: errorSchema,
         503: errorSchema
@@ -826,6 +844,9 @@ export function createApp(
     }, async ({ params, request, status }) => {
       if (!adminAuth) return status(503, unavailableAuth);
       if (!await hasAdminSession(request)) return status(401, unauthorizedAdmin);
+      if (!isAllowedManagerOrigin(request, managerOrigin)) {
+        return status(403, { code: 'admin_origin_rejected', message: 'The administrator request origin is not allowed.' });
+      }
       if (!transcriptionJobs || !transcriptionWorker) return status(503, { code: 'transcription_unavailable', message: 'OpenAI transcription is not configured on the API server.' });
       const recording = await repository.getRecording(params.recordingId);
       if (!recording) return status(404, { code: 'recording_not_found', message: 'The requested recording does not exist.' });
@@ -838,7 +859,28 @@ export function createApp(
       void transcriptionWorker.runNext(recording.id).catch((error: unknown) => {
         console.error(`Transcription retry failed for recording ${recording.id}:`, error);
       });
-      return job;
+      return transcriptFor(recording.id, recording);
+    })
+    .post('/v1/recordings/:recordingId/transcript/reprocess', {
+      params: recordingParams,
+      response: { 200: recordingTranscriptSchema, 401: errorSchema, 403: errorSchema, 404: errorSchema, 409: errorSchema, 503: errorSchema }
+    }, async ({ params, request, status }) => {
+      if (!adminAuth) return status(503, unavailableAuth);
+      if (!await hasAdminSession(request)) return status(401, unauthorizedAdmin);
+      if (!isAllowedManagerOrigin(request, managerOrigin)) {
+        return status(403, { code: 'admin_origin_rejected', message: 'The administrator request origin is not allowed.' });
+      }
+      if (!transcriptionJobs || !transcriptionWorker?.diarizationEnabled) {
+        return status(503, { code: 'diarization_unavailable', message: 'Speaker diarization is not enabled.' });
+      }
+      const recording = await repository.getRecording(params.recordingId);
+      if (!recording) return status(404, { code: 'recording_not_found', message: 'The requested recording does not exist.' });
+      const job = await transcriptionJobs.reprocess(recording.id);
+      if (!job) return status(409, { code: 'transcription_not_completed', message: 'Only a completed transcript can be reprocessed.' });
+      void transcriptionWorker.runNext(recording.id).catch((error: unknown) => {
+        console.error(`Could not reprocess recording ${recording.id}:`, error);
+      });
+      return transcriptFor(recording.id, recording);
     })
     .get('/v1/recordings/:recordingId', {
       params: recordingParams,

@@ -43,12 +43,25 @@ export interface TranscriptSegment {
 }
 
 /** Plain transcript from audio transcription; timing and speaker data are omitted unless supplied. */
+export interface RecordingTranscriptTurn {
+  id: string;
+  speaker: string;
+  startMs: number;
+  endMs: number;
+  text: string;
+  overlapsSpeech: boolean;
+}
+
 export interface RecordingTranscript {
   recordingId: string;
   state: TranscriptionJobState;
   provider: 'openai';
   model: string;
   transcriptText?: string;
+  turns?: RecordingTranscriptTurn[];
+  diarizer?: { model: string; revision?: string };
+  stage?: 'diarizing' | 'transcribing';
+  canReprocess?: boolean;
   languageCodes?: string[];
   attempts: number;
   createdAt: string;

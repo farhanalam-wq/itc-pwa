@@ -1,3 +1,4 @@
+import type { RecordingTranscriptTurn } from '@itc/domain';
 import type { Collection, Db, Document, WithId } from 'mongodb';
 
 export type TranscriptionJobState = 'queued' | 'processing' | 'completed' | 'failed';
@@ -13,6 +14,16 @@ export interface TranscriptionJob {
   processingStartedAt?: string;
   completedAt?: string;
   transcriptText?: string;
+  turns?: RecordingTranscriptTurn[];
+  diarizer?: { model: string; revision?: string };
+  mode?: 'diarized';
+  stage?: 'diarizing' | 'transcribing';
+  diarization?: {
+    modalJobId?: string;
+    audioSha256?: string;
+    diarizer?: { model: string; revision?: string };
+    clips?: (Omit<RecordingTranscriptTurn, 'text'> & { text?: string; languageCodes?: string[] })[];
+  };
   languageCodes?: string[];
   errorCode?: string;
   errorMessage?: string;
@@ -21,7 +32,9 @@ export interface TranscriptionJob {
 }
 
 export interface TranscriptionJobRepository {
-  enqueue(recordingId: string, model?: string): Promise<TranscriptionJob>;
+  enqueue(recordingId: string, model?: string, mode?: 'diarized'): Promise<TranscriptionJob>;
+  reprocess(recordingId: string): Promise<TranscriptionJob | undefined>;
+  checkpoint(recordingId: string, attempt: number, update: Partial<Pick<TranscriptionJob, 'stage' | 'diarization'>>): Promise<boolean>;
   retry(recordingId: string): Promise<TranscriptionJob | undefined>;
   get(recordingId: string): Promise<TranscriptionJob | undefined>;
   delete(recordingId: string): Promise<void>;
@@ -30,6 +43,8 @@ export interface TranscriptionJobRepository {
     recordingId: string;
     attempt: number;
     transcriptText: string;
+    turns?: RecordingTranscriptTurn[];
+    diarizer?: { model: string; revision?: string };
     languageCodes: string[];
     model: string;
     now?: Date;
@@ -79,7 +94,7 @@ export class MongoTranscriptionRepository {
   }
 
   /** Creates the durable queue entry once. Repeated calls leave completed jobs untouched. */
-  async enqueue(recordingId: string, model = 'gpt-transcribe'): Promise<TranscriptionJob> {
+  async enqueue(recordingId: string, model = 'gpt-transcribe', mode?: 'diarized'): Promise<TranscriptionJob> {
     const now = new Date();
     await this.jobs.updateOne(
       { recordingId },
@@ -89,6 +104,7 @@ export class MongoTranscriptionRepository {
           state: 'queued',
           provider: 'openai',
           model,
+          ...(mode ? { mode } : {}),
           attempts: 0,
           createdAt: now,
           updatedAt: now
@@ -99,6 +115,31 @@ export class MongoTranscriptionRepository {
     const job = await this.get(recordingId);
     if (!job) throw new Error('The transcription job could not be created.');
     return job;
+  }
+
+  async reprocess(recordingId: string): Promise<TranscriptionJob | undefined> {
+    const updated = await this.jobs.findOneAndUpdate(
+      { recordingId, state: 'completed' },
+      {
+        $set: { state: 'queued', mode: 'diarized', updatedAt: new Date() },
+        $unset: { stage: '', diarization: '' }
+      },
+      { returnDocument: 'after' }
+    );
+    return updated ? jobValue(updated) : undefined;
+  }
+
+  async checkpoint(
+    recordingId: string,
+    attempt: number,
+    update: Partial<Pick<TranscriptionJob, 'stage' | 'diarization'>>
+  ): Promise<boolean> {
+    const now = new Date();
+    const result = await this.jobs.updateOne(
+      { recordingId, state: 'processing', attempts: attempt },
+      { $set: { ...update, processingStartedAt: now, updatedAt: now } }
+    );
+    return result.matchedCount === 1;
   }
 
   /** Explicitly requeues a failed job; completed and actively leased jobs remain unchanged. */
@@ -150,6 +191,8 @@ export class MongoTranscriptionRepository {
     recordingId: string;
     attempt: number;
     transcriptText: string;
+    turns?: RecordingTranscriptTurn[];
+    diarizer?: { model: string; revision?: string };
     languageCodes: string[];
     model: string;
     now?: Date;
@@ -163,11 +206,13 @@ export class MongoTranscriptionRepository {
           provider: 'openai',
           model: input.model,
           transcriptText: input.transcriptText,
+          ...(input.turns ? { turns: input.turns } : {}),
+          ...(input.diarizer ? { diarizer: input.diarizer } : {}),
           languageCodes: input.languageCodes,
           updatedAt: now,
           completedAt: now
         },
-        $unset: { errorCode: '', errorMessage: '', retryable: '', processingStartedAt: '' }
+        $unset: { errorCode: '', errorMessage: '', retryable: '', processingStartedAt: '', stage: '', diarization: '', ...(input.turns ? {} : { turns: '' }), ...(input.diarizer ? {} : { diarizer: '' }) }
       },
       { returnDocument: 'after' }
     );

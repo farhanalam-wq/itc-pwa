@@ -3,6 +3,8 @@ import { createApp } from './app';
 import { MongoAdminAuthService } from './auth/admin-auth';
 import { createMongoRecordingRepository } from './repositories/mongo-recording-repository';
 import { createMongoTranscriptionRepository } from './repositories/mongo-transcription-repository';
+import { DiarizedTranscriptionPipeline } from './services/diarized-transcription';
+import { ModalDiarizationClient, readModalDiarizationConfig } from './services/modal-diarization';
 import { OpenAITranscriptionWorker } from './services/openai-transcription-worker';
 import { OpenAIAudioTranscriptionProvider } from './services/openai-transcription';
 import { readMongoConfig, readStorageConfig } from './services/storage/config';
@@ -11,6 +13,9 @@ import { createRecordingStorage } from './services/storage/recording-storage';
 const port = Number(Bun.env.PORT ?? 3004);
 
 async function start(): Promise<void> {
+  const diarized = Bun.env.OPENAI_TRANSCRIPTION_MODE === 'diarized'
+    ? new DiarizedTranscriptionPipeline(new ModalDiarizationClient(readModalDiarizationConfig()))
+    : undefined;
   const mongo = readMongoConfig();
   if (!mongo) {
     throw new Error('MONGODB_URI is required to start the API. Set MONGODB_URI and MONGODB_DATABASE in apps/api/.env.');
@@ -30,7 +35,8 @@ async function start(): Promise<void> {
     transcriptionJobs,
     repository,
     storage,
-    new OpenAIAudioTranscriptionProvider()
+    new OpenAIAudioTranscriptionProvider(),
+    diarized
   );
   const app = createApp(repository, undefined, undefined, undefined, storage, adminAuth, transcriptionWorker, transcriptionJobs);
 

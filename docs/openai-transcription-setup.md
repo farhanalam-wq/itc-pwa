@@ -99,3 +99,13 @@ The deployed endpoint rejected an unauthenticated request with HTTP 401. With pr
 The initial request took about 270 seconds including queueing and startup, with 1.64 seconds reported by the worker for inference. Subsequent submissions returned in 5–7 seconds including polling, with about 0.37 seconds of inference. Resuming the completed job took under a second. These are individual observations, not a latency guarantee or a measurement of billed cost.
 
 The [synthetic stress evaluation](../apps/api/evaluation/README.md) found both speakers in the expected order with noise and overlap. GPT still made some script and wording errors when languages switched inside an uninterrupted phrase. Keep this path in staging until those quality limits and Modal audio residency have been reviewed.
+
+## Enable speaker turns in the API
+
+The default API workflow sends one file to GPT and returns plain text. To opt in to timestamped speaker turns, install FFmpeg on the API host and set `OPENAI_TRANSCRIPTION_MODE=diarized` alongside the Modal URL and proxy credentials. Restart the API. This changes the mode for new jobs. Completed transcripts and previously queued whole-file jobs keep their existing mode.
+
+Diarized jobs send decoded audio to Modal once and store the job ID in MongoDB. The API resumes from the saved ID after a restart when Modal still has the result. It stores each completed GPT clip so a retry can skip clips already saved. The transcript only switches to the new result once the job completes. If the mode is disabled while a diarized job is outstanding, re-enable it before retrying that job.
+
+The manager displays elapsed timestamps, anonymous speaker labels, and flags for overlapping speech. Select a timestamp to play from that point in the stored recording. With diarization enabled, an administrator can choose **Reprocess with speaker turns** on a completed transcript. This sends the stored recording through the current diarized path. There is no bulk backfill.
+
+Start with synthetic or approved pilot audio. Confirm residency and retention requirements before enabling the flag for a deployment that handles real field audio. The synthetic noise/overlap evaluation still found script mistakes when languages changed within a phrase. Treat the text as a model result and use the source audio to verify it.

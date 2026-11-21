@@ -228,7 +228,7 @@ export class MongoRecordingRepository implements RecordingRepository {
   async transitionAnalysisState(id: string, next: AnalysisState): Promise<boolean> {
     const allowedFrom: Record<AnalysisState, AnalysisState[]> = {
       not_started: [],
-      transcribing: ['not_started', 'error'],
+      transcribing: ['not_started', 'error', 'ready'],
       analyzing: ['transcribing'],
       ready: ['analyzing', 'transcribing'],
       error: ['transcribing', 'analyzing']

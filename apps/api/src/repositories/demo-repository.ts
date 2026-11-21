@@ -92,7 +92,7 @@ const allowedAnalysisTransitions: Record<AnalysisState, readonly AnalysisState[]
   not_started: ['transcribing'],
   transcribing: ['analyzing', 'ready', 'error'],
   analyzing: ['ready', 'error'],
-  ready: [],
+  ready: ['transcribing'],
   error: ['transcribing']
 };
 
