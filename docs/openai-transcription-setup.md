@@ -58,3 +58,36 @@ For a local check without pyannote or OpenAI, pass `--synthetic-timeline /path/t
 ```
 
 Before wiring Modal or MongoDB, compare the outputs on consented samples with English, Hindi and Bangla in different orders. Check speaker changes, short replies, word clipping at clip boundaries and script switches within a turn. The prototype marks overlapping speech but does not separate it into individual voice tracks. Confirm the quality and cost of the clip approach before adding background retries and the admin view.
+
+### Modal staging
+
+The staging app runs pyannote Community-1 on a GPU. The Bun prototype decodes the audio locally, sends the resulting 16 kHz mono PCM to Modal, and uses that same PCM for the GPT clips. The Modal app returns speaker and overlap intervals and the hash of the submitted PCM. MongoDB, audio storage, GPT transcription, and the manager stay on the existing API.
+
+1. Install the Modal CLI using the version in `apps/api/pyannote/requirements-modal.txt` and authenticate it in the intended Modal workspace. Set `MODAL_ENVIRONMENT` if that workspace uses a dedicated staging environment.
+2. In that environment, create the Modal Secret `itc-pyannote-huggingface` with the `HF_TOKEN` entry only. The model download needs this token. The running GPU worker loads the pinned weights from a Volume.
+3. From the repository root, download the weights and deploy:
+
+   ```bash
+   modal run apps/api/pyannote/modal_app.py::download_model
+   modal deploy apps/api/pyannote/modal_app.py
+   ```
+
+4. Create a Modal proxy token for the endpoint and configure the following in the ignored `apps/api/.env`. Use the HTTPS origin shown by deployment. The proxy token is separate from the Modal CLI credentials.
+
+   ```dotenv
+   MODAL_DIARIZATION_URL=https://your-workspace--your-app.modal.run
+   MODAL_DIARIZATION_KEY=wk_your_proxy_key
+   MODAL_DIARIZATION_SECRET=ws_your_proxy_secret
+   ```
+
+5. Submit a synthetic recording for the staging comparison:
+
+   ```bash
+   bun run --cwd apps/api prototype:diarize /path/to/synthetic-sample.wav --modal --transcribe
+   ```
+
+   Omit `--transcribe` to check only the Modal timeline. The prototype prints the Modal job ID to stderr before polling. To pick up the same job in a new process, rerun the command with `--resume-job <id>` and the same input file. The client validates the audio hash before using the timeline. If submit times out before returning an ID, the client reports the error instead of automatically starting a second job.
+
+For staging acceptance, verify the endpoint rejects unauthenticated requests, compare returned intervals with the local run on the same PCM, and measure first and subsequent requests separately. Use Modal invocation telemetry for actual GPU cost. The prototype reports both elapsed time including polling and inference time from the worker.
+
+Use synthetic audio in staging. Modal stores asynchronous function payloads in the United States. Confirm audio residency and retention requirements before using this transport for field recordings. See [Modal data residency](https://modal.com/docs/guide/data-residency).

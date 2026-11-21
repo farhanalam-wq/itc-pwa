@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { ModalDiarizationClient, readModalDiarizationConfig } from './modal-diarization';
 import { OpenAIAudioTranscriptionProvider, readOpenAITranscriptionConfig } from '../services/openai-transcription';
 
 const SAMPLE_RATE = 16_000;
@@ -103,19 +104,23 @@ async function main() {
     allowPositionals: true,
     options: {
       transcribe: { type: 'boolean' },
+      modal: { type: 'boolean' },
+      'resume-job': { type: 'string' },
       'synthetic-timeline': { type: 'string' },
       help: { type: 'boolean' }
     }
   });
   if (values.help) {
-    console.log('Usage: bun run prototype:diarize <audio> [--transcribe | --synthetic-timeline <json>]');
+    console.log('Usage: bun run prototype:diarize <audio> [--modal [--resume-job <id>]] [--transcribe | --synthetic-timeline <json>]');
     return;
   }
   const [input] = positionals;
   if (!input || positionals.length !== 1) throw new Error('Pass one recording. Use --help for usage.');
-  if (values.transcribe && values['synthetic-timeline']) {
+  if ((values.transcribe || values.modal) && values['synthetic-timeline']) {
     throw new Error('Synthetic timelines support local clip planning only.');
   }
+  if (values['resume-job'] && !values.modal) throw new Error('--resume-job requires --modal.');
+  const modalClient = values.modal ? new ModalDiarizationClient(readModalDiarizationConfig()) : undefined;
   if (values.transcribe && !readOpenAITranscriptionConfig().configured) {
     throw new Error('Set OPENAI_API_KEY to enable transcription.');
   }
@@ -138,9 +143,21 @@ async function main() {
 
     const syntheticPath = values['synthetic-timeline'];
     let rawTimeline: unknown;
+    let modalJobId: string | undefined;
+    let modalModelRevision: string | undefined;
+    let modalInferenceMs: number | undefined;
     const diarizationStart = performance.now();
     if (syntheticPath) {
       rawTimeline = await Bun.file(syntheticPath).json();
+    } else if (modalClient) {
+      const result = await modalClient.run(pcm, {
+        resumeJobId: values['resume-job'],
+        onJobId: (id) => console.error(`Modal job: ${id}. To resume after interruption, rerun with --modal --resume-job ${id}.`)
+      });
+      modalJobId = result.jobId;
+      modalModelRevision = result.modelRevision;
+      modalInferenceMs = result.inferenceMs;
+      rawTimeline = result.timeline;
     } else {
       const python = Bun.env.PYANNOTE_PYTHON || 'python3';
       const script = fileURLToPath(new URL('../../pyannote/diarize.py', import.meta.url));
@@ -158,6 +175,9 @@ async function main() {
     const report = {
       source: syntheticPath ? 'synthetic-timeline' : timeline.source,
       durationMs,
+      ...(modalJobId ? { modalJobId } : {}),
+      ...(modalModelRevision ? { modalModelRevision } : {}),
+      ...(modalInferenceMs !== undefined ? { modalInferenceMs } : {}),
       ...(!syntheticPath ? { diarizationElapsedMs: Math.round(performance.now() - diarizationStart) } : {}),
       speakerIntervals: timeline.turns,
       overlapIntervals: timeline.overlaps
