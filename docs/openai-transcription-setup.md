@@ -28,3 +28,33 @@ Restart the API after changing the key. The API health response reports transcri
 - Transcript text and language metadata are stored in the MongoDB `transcription_jobs` collection. Audio remains in the selected local/S3 object store.
 
 OpenAI file transcription guide: <https://developers.openai.com/api/docs/guides/speech-to-text>
+
+## Speaker diarization prototype
+
+This command runs outside the upload and manager flow. It decodes one local recording to 16 kHz mono PCM with FFmpeg, gives pyannote Community-1 the full waveform, and cuts clips from the same PCM using the exclusive speaker timeline. Short gaps between consecutive turns from the same speaker can be merged. Clips are capped at 30 seconds, speaker labels are local to one recording, and overlapped speech is flagged.
+
+Use a compatible Python environment (Python 3.12 is a starting point) with the dependencies in `apps/api/pyannote/requirements.txt` and FFmpeg on your PATH. Accept the [Community-1 access conditions](https://huggingface.co/pyannote/speaker-diarization-community-1) and configure `HF_TOKEN` in your shell or the ignored `apps/api/.env`. Alternatively, point `PYANNOTE_MODEL_DIR` to a local copy of the model. Set `PYANNOTE_PYTHON` to the interpreter in your Python environment if it differs from `python3`.
+
+From the repository root, use an absolute path to an audio sample up to 10 minutes long:
+
+```bash
+bun run --cwd apps/api prototype:diarize /path/to/consented-sample.webm
+bun run --cwd apps/api prototype:diarize /path/to/consented-sample.webm --transcribe
+```
+
+The first command runs diarization and prints the clip plan as JSON. The second uses the server's `OPENAI_API_KEY` to request a whole-file baseline and one GPT transcript per clip, then reports timings and request counts. The report may contain conversation text. Keep samples and reports outside Git.
+
+For a local check without pyannote or OpenAI, pass `--synthetic-timeline /path/to/fixture.json` instead of `--transcribe`. Fixture format:
+
+```json
+{
+  "source": "synthetic",
+  "turns": [
+    { "startMs": 0, "endMs": 1200, "speaker": "A" },
+    { "startMs": 1300, "endMs": 2500, "speaker": "B" }
+  ],
+  "overlaps": []
+}
+```
+
+Before wiring Modal or MongoDB, compare the outputs on consented samples with English, Hindi and Bangla in different orders. Check speaker changes, short replies, word clipping at clip boundaries and script switches within a turn. The prototype marks overlapping speech but does not separate it into individual voice tracks. Confirm the quality and cost of the clip approach before adding background retries and the admin view.
