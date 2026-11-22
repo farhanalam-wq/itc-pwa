@@ -367,7 +367,7 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
   const capturePlayer = useRef<HTMLAudioElement | null>(null);
   const pendingCaptureSeek = useRef<{ id: string; seconds: number } | null>(null);
   const [reprocessError, setReprocessError] = useState<{ id: string; message: string } | null>(null);
-  const [activeCaptureAudio, setActiveCaptureAudio] = useState<{ id: string; url: string } | null>(null);
+  const [activeCaptureAudio, setActiveCaptureAudio] = useState<{ id: string; url: string; artifact: 'original' | 'denoised' } | null>(null);
   const [captureAudioLoading, setCaptureAudioLoading] = useState<string | null>(null);
   const [deletingCapture, setDeletingCapture] = useState<string | null>(null);
   const [captureDeleteNotice, setCaptureDeleteNotice] = useState<{ error: boolean; text: string } | null>(null);
@@ -855,7 +855,7 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
       applyCaptureSeek(recordingId, capturePlayer.current);
       return;
     }
-    await toggleCaptureAudio(recordingId, true);
+    await loadCaptureAudio(recordingId, 'original', true);
   }
 
   async function toggleCaptureAudio(recordingId: string, forSeek = false) {
@@ -864,16 +864,41 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
       setActiveCaptureAudio(null);
       return;
     }
+    await loadCaptureAudio(recordingId, activeCaptureAudio?.id === recordingId ? activeCaptureAudio.artifact : 'original', forSeek);
+  }
+
+  async function loadCaptureAudio(recordingId: string, artifact: 'original' | 'denoised', forSeek = false) {
+    if (!forSeek) pendingCaptureSeek.current = null;
     setCaptureAudioLoading(recordingId);
     setCapturePlaybackError(null);
     try {
-      const link = await captureApi.getRecordingDownloadUrl(recordingId);
-      setActiveCaptureAudio({ id: recordingId, url: link.url });
+      const link = await captureApi.getRecordingDownloadUrl(recordingId, artifact);
+      setActiveCaptureAudio({ id: recordingId, url: link.url, artifact });
     } catch (error) {
       setCapturePlaybackError(error instanceof Error ? error.message : 'The uploaded audio link could not be created.');
     } finally {
       setCaptureAudioLoading(null);
     }
+  }
+
+  function renderCaptureAudioVersion(recording: RecordingMetadata) {
+    const denoisedAvailable = recording.denoisedAnalysisAudio?.state === 'ready'
+      && recording.denoisedAnalysisAudio.syncState === 'uploaded'
+      && recording.denoisedAnalysisAudio.sampleRateHz === 48_000
+      && Boolean(recording.denoisedAnalysisAudio.objectKey
+        && recording.denoisedAnalysisAudio.sha256
+        && recording.denoisedAnalysisAudio.durationSeconds);
+    if (activeCaptureAudio?.id !== recording.id) return null;
+    return <div className="capture-audio-version" role="group" aria-label="Audio version">
+      <button type="button" aria-pressed={activeCaptureAudio.artifact === 'original'}
+        disabled={captureAudioLoading === recording.id || activeCaptureAudio.artifact === 'original'}
+        onClick={() => void loadCaptureAudio(recording.id, 'original')}>Original</button>
+      <button type="button" aria-pressed={activeCaptureAudio.artifact === 'denoised'}
+        disabled={!denoisedAvailable || captureAudioLoading === recording.id}
+        title={denoisedAvailable ? 'Play denoised analysis audio' : 'Denoised audio is not available'}
+        onClick={() => { if (activeCaptureAudio.artifact !== 'denoised') void loadCaptureAudio(recording.id, 'denoised'); }}>Denoised</button>
+      <span>{activeCaptureAudio.artifact === 'denoised' ? 'Analysis copy' : denoisedAvailable ? 'Source recording' : 'Denoised copy unavailable'}</span>
+    </div>;
   }
 
   function toggleCaptureTranscript(recordingId: string) {
@@ -1043,7 +1068,7 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
         {recording.syncState === 'uploaded'
           ? <div className="live-capture-actions"><span className={`capture-compact-status analysis-${recording.analysisState}`}>{analysisStateDetails[recording.analysisState].label}</span>{recording.conversationAnalysisState && <span className={`capture-compact-status conversation-state-${recording.conversationAnalysisState}`}>{conversationAnalysisLabels[recording.conversationAnalysisState]}</span>}<button className="live-audio-button" type="button" onClick={() => void toggleCaptureAudio(recording.id)} disabled={captureAudioLoading === recording.id}>{captureAudioLoading === recording.id ? 'Loading…' : activeCaptureAudio?.id === recording.id ? 'Close audio' : 'Listen to audio'}</button><button className="live-transcript-button" type="button" aria-expanded={selectedCaptureTranscriptId === recording.id} aria-controls={`recording-transcript-${recording.id}`} onClick={() => toggleCaptureTranscript(recording.id)}>{selectedCaptureTranscriptId === recording.id ? 'Hide transcript' : hasCompletedCaptureTranscript(recording.id) ? 'View transcript' : 'Transcript status'}</button></div>
           : <span className={`live-upload-state sync-${recording.syncState}`}>{recording.syncState === 'queued' ? 'Waiting for upload' : recording.syncState === 'uploading' ? 'Uploading' : 'Upload needs attention'}</span>}
-        {activeCaptureAudio?.id === recording.id && <audio ref={capturePlayer} className="live-capture-player" controls preload="metadata" onLoadedMetadata={(event) => applyCaptureSeek(recording.id, event.currentTarget)} src={activeCaptureAudio.url} aria-label={`Audio for ${recording.outletName || 'field recording'}, ${formatDateTime(recording.startedAt)}`}/>}
+        {activeCaptureAudio?.id === recording.id && <>{renderCaptureAudioVersion(recording)}<audio key={`${recording.id}-${activeCaptureAudio.artifact}`} ref={capturePlayer} className="live-capture-player" controls preload="metadata" onLoadedMetadata={(event) => applyCaptureSeek(recording.id, event.currentTarget)} src={activeCaptureAudio.url} aria-label={`${activeCaptureAudio.artifact === 'denoised' ? 'Denoised analysis audio' : 'Original audio'} for ${recording.outletName || 'field recording'}, ${formatDateTime(recording.startedAt)}`}/></>}
         <div id={`recording-transcript-${recording.id}`} className="live-transcript-slot" hidden={selectedCaptureTranscriptId !== recording.id}>{renderCaptureTranscript(recording.id)}</div>
       </article>)}
     </section>;
@@ -1321,7 +1346,7 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
                   </td>
                 </tr>
                 {(audioOpen || transcriptOpen) && <tr className="capture-table-details"><td colSpan={6}>
-                  {audioOpen && <audio ref={capturePlayer} className="field-pwa-audio-player" controls preload="metadata" onLoadedMetadata={(event) => applyCaptureSeek(recording.id, event.currentTarget)} src={activeCaptureAudio.url} aria-label={`Audio for ${label}, ${recorded}`}/>}
+                  {audioOpen && <>{renderCaptureAudioVersion(recording)}<audio key={`${recording.id}-${activeCaptureAudio.artifact}`} ref={capturePlayer} className="field-pwa-audio-player" controls preload="metadata" onLoadedMetadata={(event) => applyCaptureSeek(recording.id, event.currentTarget)} src={activeCaptureAudio.url} aria-label={`${activeCaptureAudio.artifact === 'denoised' ? 'Denoised analysis audio' : 'Original audio'} for ${label}, ${recorded}`}/></>}
                   {transcriptOpen && <div id={transcriptId}>{renderCaptureTranscript(recording.id)}</div>}
                 </td></tr>}
               </tbody>;

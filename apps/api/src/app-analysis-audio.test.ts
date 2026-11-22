@@ -10,6 +10,7 @@ import { LocalRecordingStorage } from './services/local-recording-storage';
 import type { RecordingObjectStorage } from './services/storage/recording-storage';
 import type { OpenAITranscriptionWorker } from './services/openai-transcription-worker';
 import type { TranscriptionJobRepository } from './repositories/mongo-transcription-repository';
+import type { AdminAuthService } from './auth/admin-auth';
 
 test('raw upload never queues Pyannote; denoised analysis artifact completion does', async () => {
   const root = await mkdtemp(join(tmpdir(), 'itc-analysis-route-'));
@@ -26,7 +27,7 @@ test('raw upload never queues Pyannote; denoised analysis artifact completion do
           byteLength: input.bytes.byteLength, mimeType: input.mimeType, sha256: hash(input.bytes)
         };
       },
-      async readFinal() { return new Uint8Array(); },
+      async readFinal(objectKey) { return objectKey.includes('.analysis.') ? analysisBytes : rawBytes; },
       async deleteFinal() {},
       async createDownloadUrl() { throw new Error('unused'); }
     };
@@ -35,9 +36,15 @@ test('raw upload never queues Pyannote; denoised analysis artifact completion do
       async enqueue(recordingId: string) { queueCalls.push(recordingId); return { state: 'queued' }; },
       async runNext() { return { state: 'not_ready' }; }
     } as unknown as OpenAITranscriptionWorker;
+    const adminAuth = {
+      cookieSecure: false,
+      async getSession(token: string | undefined) {
+        return token === 'test-session' ? { id: 'primary' as const, email: 'manager@example.test', displayName: 'Test Manager' } : undefined;
+      }
+    } as AdminAuthService;
     const app = createApp(
       repository, undefined, undefined, new LocalRecordingStorage(root), objectStorage,
-      undefined, transcriptionWorker, {} as TranscriptionJobRepository
+      adminAuth, transcriptionWorker, {} as TranscriptionJobRepository
     );
     const visitResponse = await app.handle('/v1/visits', {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -72,6 +79,21 @@ test('raw upload never queues Pyannote; denoised analysis artifact completion do
     expect(saved.objectKey).toContain('recording-1.webm');
     expect(saved.denoisedAnalysisAudio?.objectKey).toContain('recording-1.analysis.webm');
     expect(saved.denoisedAnalysisAudio?.sha256).toBe(hash(analysisBytes));
+
+    const unauthenticated = await app.handle('/v1/recordings/recording-1/download-url?artifact=denoised');
+    expect(unauthenticated.status).toBe(401);
+    const headers = { cookie: 'itc_admin_session=test-session' };
+    const originalDownload = await app.handle('/v1/recordings/recording-1/download-url', { headers });
+    expect(originalDownload.status).toBe(200);
+    expect((await originalDownload.json()).objectKey).toBe(saved.objectKey);
+    const denoisedDownload = await app.handle('/v1/recordings/recording-1/download-url?artifact=denoised', { headers });
+    expect(denoisedDownload.status).toBe(200);
+    expect((await denoisedDownload.json()).objectKey).toBe(saved.denoisedAnalysisAudio?.objectKey);
+
+    const denoisedPlayback = await app.handle('/v1/recordings/recording-1/audio?artifact=denoised', { headers });
+    expect(denoisedPlayback.status).toBe(200);
+    expect(denoisedPlayback.headers.get('content-type')).toBe('audio/webm');
+    expect([...new Uint8Array(await denoisedPlayback.arrayBuffer())]).toEqual([...analysisBytes]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -264,6 +264,7 @@ const createRecordingBody = t.Object({
 });
 
 const recordingParams = t.Object({ recordingId: t.String({ minLength: 1, maxLength: 128 }) });
+const recordingAudioQuery = t.Object({ artifact: t.Optional(t.Union([t.Literal('original'), t.Literal('denoised')])) });
 const recordingChunkParams = t.Object({ recordingId: t.String({ minLength: 1, maxLength: 128 }), chunkIndex: t.Numeric({ minimum: 0 }), chunkCount: t.Numeric({ minimum: 1 }) });
 const visitParams = t.Object({ visitId: t.String({ minLength: 1, maxLength: 128 }) });
 
@@ -981,6 +982,7 @@ export function createApp(
     })
     .get('/v1/recordings/:recordingId/download-url', {
       params: recordingParams,
+      query: recordingAudioQuery,
       response: {
         200: signedUrlSchema,
         401: errorSchema,
@@ -988,48 +990,63 @@ export function createApp(
         409: errorSchema,
         503: uploadUnavailableSchema
       }
-    }, async ({ params, request, status }) => {
+    }, async ({ params, query, request, status }) => {
       if (!adminAuth) return status(503, unavailableAuth);
       if (!await hasAdminSession(request)) return status(401, unauthorizedAdmin);
       const recording = await repository.getRecording(params.recordingId);
       if (!recording) return status(404, { code: 'recording_not_found', message: 'The recording metadata was not found.' });
-      if (recording.syncState !== 'uploaded' || !recording.objectKey || !recording.storageDriver) {
+      const artifact = query.artifact === 'denoised' ? recording.denoisedAnalysisAudio : undefined;
+      const objectKey = query.artifact === 'denoised'
+        ? denoisedArtifactFor(recording) && artifact?.objectKey
+        : recording.objectKey;
+      if (query.artifact === 'denoised' && !objectKey) {
+        return status(409, { code: 'denoised_audio_unavailable', message: 'Denoised playback is not available for this recording.' });
+      }
+      if (recording.syncState !== 'uploaded' || !objectKey || !recording.storageDriver) {
         return status(409, { code: 'recording_not_uploaded', message: 'This conversation does not have a stored audio file.' });
       }
       if (recording.storageDriver === 's3') {
         try {
           return {
-            ...await recordingStorage.createDownloadUrl(recording.objectKey),
-            objectKey: recording.objectKey
+            ...await recordingStorage.createDownloadUrl(objectKey),
+            objectKey
           };
         } catch {
           return status(503, { code: 'recording_link_failed', message: 'The API could not create a temporary S3 playback link.' });
         }
       }
       return {
-        url: `/api/v1/recordings/${encodeURIComponent(recording.id)}/audio`,
-        objectKey: recording.objectKey,
+        url: `/api/v1/recordings/${encodeURIComponent(recording.id)}/audio${query.artifact === 'denoised' ? '?artifact=denoised' : ''}`,
+        objectKey,
         expiresAt: new Date(Date.now() + 5 * 60_000).toISOString()
       };
     })
     .get('/v1/recordings/:recordingId/audio', {
       params: recordingParams,
+      query: recordingAudioQuery,
       response: { 401: errorSchema, 404: errorSchema, 409: errorSchema, 503: errorSchema }
-    }, async ({ params, request, status }) => {
+    }, async ({ params, query, request, status }) => {
       if (!adminAuth) return status(503, unavailableAuth);
       if (!await hasAdminSession(request)) return status(401, unauthorizedAdmin);
       const recording = await repository.getRecording(params.recordingId);
       if (!recording) return status(404, { code: 'recording_not_found', message: 'The recording metadata was not found.' });
-      if (recording.syncState !== 'uploaded' || !recording.objectKey || recording.storageDriver !== 'local') {
+      const analysisAudio = query.artifact === 'denoised' ? recording.denoisedAnalysisAudio : undefined;
+      const objectKey = query.artifact === 'denoised'
+        ? denoisedArtifactFor(recording) && analysisAudio?.objectKey
+        : recording.objectKey;
+      if (query.artifact === 'denoised' && !objectKey) {
+        return status(409, { code: 'denoised_audio_unavailable', message: 'Denoised playback is not available for this recording.' });
+      }
+      if (recording.syncState !== 'uploaded' || !objectKey || recording.storageDriver !== 'local') {
         return status(409, { code: 'recording_not_available', message: 'The local audio file is not available.' });
       }
       try {
-        const audio = await recordingStorage.readFinal(recording.objectKey, 'local');
+        const audio = await recordingStorage.readFinal(objectKey, 'local');
         const body = new Uint8Array(new ArrayBuffer(audio.byteLength));
         body.set(audio);
         return new Response(body, {
           headers: {
-            'Content-Type': recording.mimeType,
+            'Content-Type': query.artifact === 'denoised' ? analysisAudio?.mimeType ?? 'application/octet-stream' : recording.mimeType,
             'Content-Length': String(audio.byteLength),
             'Cache-Control': 'private, no-store'
           }

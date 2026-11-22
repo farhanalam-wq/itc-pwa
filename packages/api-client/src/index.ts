@@ -152,7 +152,7 @@ export interface ApiClient {
   retryRecordingTranscription(recordingId: string): Promise<RecordingTranscript>;
   getRecordingSyncStatus(recordingId: string): Promise<RecordingSyncStatus>;
   listRecordings(query?: ListRecordingsQuery): Promise<RecordingPage>;
-  getRecordingDownloadUrl(recordingId: string): Promise<SignedRecordingUrl>;
+  getRecordingDownloadUrl(recordingId: string, artifact?: 'original' | 'denoised'): Promise<SignedRecordingUrl>;
   uploadRecordingAudio(recordingId: string, file: Blob, onChunk?: (sent: number, total: number) => void): Promise<RecordingMetadata>;
   uploadRecordingAnalysisAudio(recordingId: string, file: Blob, onChunk?: (sent: number, total: number) => void): Promise<RecordingMetadata>;
   getRecordingConversationAnalysis(recordingId: string): Promise<RecordingConversationAnalysis>;
@@ -302,8 +302,8 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
       const suffix = queryString ? '?' + queryString : '';
       return request<RecordingPage>('/v1/recordings' + suffix);
     },
-    getRecordingDownloadUrl: (recordingId) => request<SignedRecordingUrl>(
-      '/v1/recordings/' + encodeURIComponent(recordingId) + '/download-url'
+    getRecordingDownloadUrl: (recordingId, artifact = 'original') => request<SignedRecordingUrl>(
+      '/v1/recordings/' + encodeURIComponent(recordingId) + '/download-url' + (artifact === 'denoised' ? '?artifact=denoised' : '')
     ),
     uploadRecordingAudio: async (recordingId, file, onChunk) => {
       const chunkSize = 1024 * 1024;
