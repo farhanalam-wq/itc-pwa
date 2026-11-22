@@ -48,42 +48,88 @@ export async function uploadPendingAudio(client: ApiClient, onProgress?: (progre
 
   for (const recording of pending) {
     let objectKey: string | undefined;
+    let rawAudioAlreadyUploaded = false;
     try {
       const remote = await client.getRecordingSyncStatus(recording.id);
-      if (remote.syncState === 'uploaded') {
+      rawAudioAlreadyUploaded = remote.syncState === 'uploaded';
+      if (!rawAudioAlreadyUploaded) {
+        const file = await recordingStore.readAudio(recording.id);
+        if (file.size !== recording.byteLength) {
+          throw new Error('The local audio file size no longer matches its saved recording details.');
+        }
+        await recordingStore.setSyncState(recording.id, 'uploading', { incrementAttempt: true });
+        const totalChunks = Math.max(1, Math.ceil(file.size / (1024 * 1024)));
+        onProgress?.({ recordingId: recording.id, outletName: recording.outletName, completedChunks: 0, totalChunks, state: 'uploading' });
+        const stored = await client.uploadRecordingAudio(recording.id, file, (completedChunks, total) => {
+          onProgress?.({ recordingId: recording.id, outletName: recording.outletName, completedChunks, totalChunks: total, state: 'uploading' });
+        });
+        objectKey = stored.objectKey;
+        await recordingStore.setSyncState(recording.id, 'uploaded', { objectKey });
+        onProgress?.({ recordingId: recording.id, outletName: recording.outletName, completedChunks: totalChunks, totalChunks, state: 'complete' });
+      } else {
         await recordingStore.setSyncState(recording.id, 'uploaded');
-        uploaded += 1;
-        continue;
       }
-      const file = await recordingStore.readAudio(recording.id);
-      if (file.size !== recording.byteLength) {
-        throw new Error('The local audio file size no longer matches its saved recording details.');
-      }
-      await recordingStore.setSyncState(recording.id, 'uploading', {
-        incrementAttempt: true
-      });
-      const totalChunks = Math.max(1, Math.ceil(file.size / (1024 * 1024)));
-      onProgress?.({ recordingId: recording.id, outletName: recording.outletName, completedChunks: 0, totalChunks, state: 'uploading' });
-      const stored = await client.uploadRecordingAudio(recording.id, file, (completedChunks, total) => {
-        onProgress?.({ recordingId: recording.id, outletName: recording.outletName, completedChunks, totalChunks: total, state: 'uploading' });
-      });
-      objectKey = stored.objectKey;
-      await recordingStore.setSyncState(recording.id, 'uploaded', { objectKey });
       uploaded += 1;
-      onProgress?.({ recordingId: recording.id, outletName: recording.outletName, completedChunks: totalChunks, totalChunks, state: 'complete' });
     } catch (error) {
-      await recordingStore.setSyncState(recording.id, 'error', {
-        objectKey,
-        error: errorMessage(error),
-        retryable: isRetryable(error)
-      }).catch(() => undefined);
+      const message = errorMessage(error);
+      const retryable = isRetryable(error);
+      if (!rawAudioAlreadyUploaded) {
+        await recordingStore.setSyncState(recording.id, 'error', {
+          objectKey,
+          error: message,
+          retryable
+        }).catch(() => undefined);
+      }
       failures.push({
         id: recording.id,
         message: error instanceof ApiClientError && error.status === 503
           ? error.message
-          : errorMessage(error)
+          : message
       });
       onProgress?.({ recordingId: recording.id, outletName: recording.outletName, completedChunks: 0, totalChunks: Math.max(1, Math.ceil(recording.byteLength / (1024 * 1024))), state: 'error' });
+      continue;
+    }
+
+    // Raw recording upload remains independent and durable. The server gates
+    // Pyannote until this separately stored artifact is complete.
+    if (recording.denoisedAudioState === 'ready'
+      && recording.denoisedAudioFileName
+      && recording.denoisedAudioSyncState !== 'uploaded') {
+      let analysisInProgress = false;
+      try {
+        const analysisFile = await recordingStore.readDenoisedAudio(recording.id);
+        if (analysisFile.size !== recording.denoisedAudioByteLength) {
+          throw new Error('The local denoised audio size no longer matches its saved analysis details.');
+        }
+        analysisInProgress = true;
+        await recordingStore.setDenoisedAudioSyncState(recording.id, 'uploading');
+        const totalChunks = Math.max(1, Math.ceil(analysisFile.size / (1024 * 1024)));
+        onProgress?.({ recordingId: recording.id, outletName: recording.outletName, completedChunks: 0, totalChunks, state: 'uploading' });
+        const storedAnalysis = await client.uploadRecordingAnalysisAudio(recording.id, analysisFile, (completedChunks, total) => {
+          onProgress?.({ recordingId: recording.id, outletName: recording.outletName, completedChunks, totalChunks: total, state: 'uploading' });
+        });
+        await recordingStore.setDenoisedAudioSyncState(recording.id, 'uploaded', {
+          objectKey: storedAnalysis.denoisedAnalysisAudio?.objectKey
+        });
+        onProgress?.({ recordingId: recording.id, outletName: recording.outletName, completedChunks: totalChunks, totalChunks, state: 'complete' });
+      } catch (error) {
+        const message = errorMessage(error);
+        if (analysisInProgress) {
+          await recordingStore.setDenoisedAudioSyncState(recording.id, 'error', {
+            error: message,
+            retryable: isRetryable(error)
+          }).catch(() => undefined);
+        } else {
+          await recordingStore.markDenoisedAudioUnavailable(
+            recording.id,
+            message,
+            'failed',
+            'denoised_sidecar_invalid'
+          ).catch(() => undefined);
+        }
+        failures.push({ id: recording.id, message });
+        onProgress?.({ recordingId: recording.id, outletName: recording.outletName, completedChunks: 0, totalChunks: Math.max(1, Math.ceil((recording.denoisedAudioByteLength ?? 0) / (1024 * 1024))), state: 'error' });
+      }
     }
   }
 

@@ -39,6 +39,12 @@ export function audioFileName(id: string, mimeType: string): string {
   return safeId + '.' + extension;
 }
 
+export function denoisedAudioFileName(id: string, mimeType: string): string {
+  const original = audioFileName(id, mimeType);
+  const extension = original.slice(original.lastIndexOf('.') + 1);
+  return original.slice(0, original.lastIndexOf('.')) + '.denoised.' + extension;
+}
+
 export async function getAudioFile(fileName: string): Promise<File> {
   const directory = await getRecordingDirectory();
   const handle = await directory.getFileHandle(fileName);
