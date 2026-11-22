@@ -948,10 +948,14 @@ function FieldApp() {
   </div>;
 }
 
-registerFieldServiceWorker();
-
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <FieldApp/>
-  </StrictMode>
-);
+if (import.meta.env.DEV && window.location.pathname === '/__noise-fixtures') {
+  const { NoiseFixtureRunner } = await import('./dev/noise-fixture-runner');
+  createRoot(document.getElementById('root')!).render(<NoiseFixtureRunner/>);
+} else {
+  registerFieldServiceWorker();
+  createRoot(document.getElementById('root')!).render(
+    <StrictMode>
+      <FieldApp/>
+    </StrictMode>
+  );
+}

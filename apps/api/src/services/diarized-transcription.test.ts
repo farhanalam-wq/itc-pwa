@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import type { TranscriptionJob } from '../repositories/mongo-transcription-repository';
 import { wavFromPcm } from './diarization-audio';
 import { DiarizedTranscriptionPipeline } from './diarized-transcription';
@@ -71,4 +72,53 @@ test('persists the Modal job before polling and resumes only missing clips', asy
   ]);
   expect(completed.diarizer).toEqual({ model: 'synthetic-model', revision: 'synthetic-revision' });
   expect(completed.languageCodes).toEqual(['en', 'bn']);
+});
+
+test('drops a saved sub-100 ms diarization fragment when resuming a failed transcript', async () => {
+  const pcm = new Uint8Array(32_000);
+  const audioSha256 = createHash('sha256').update(pcm).digest('hex');
+  const calls: string[] = [];
+  const pipeline = new DiarizedTranscriptionPipeline({
+    async run() {
+      throw new Error('Saved diarization should be reused on this retry.');
+    }
+  });
+  const job: TranscriptionJob = {
+    recordingId: 'synthetic-short-turn-retry',
+    state: 'processing',
+    mode: 'diarized',
+    provider: 'openai',
+    model: 'gpt-transcribe',
+    attempts: 2,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    diarization: {
+      audioSha256,
+      diarizer: { model: 'synthetic-model', revision: 'test-revision' },
+      clips: [
+        { id: 'turn-1', speaker: 'Speaker 1', startMs: 0, endMs: 400, overlapsSpeech: false },
+        { id: 'turn-2', speaker: 'Speaker 2', startMs: 400, endMs: 417, overlapsSpeech: false }
+      ]
+    }
+  };
+  const completed = await pipeline.transcribe({
+    job,
+    bytes: wavFromPcm(pcm),
+    mimeType: 'audio/wav',
+    provider: {
+      async transcribe({ recordingId }) {
+        calls.push(recordingId);
+        return { text: 'Synthetic speech', languageCodes: ['en'], model: 'gpt-transcribe' };
+      }
+    },
+    checkpoint: async () => undefined,
+    signal: new AbortController().signal
+  });
+
+  expect(calls).toEqual(['synthetic-short-turn-retry-turn-1']);
+  expect(completed.turns).toEqual([{
+    id: 'turn-1', speaker: 'Speaker 1', startMs: 0, endMs: 400,
+    overlapsSpeech: false, text: 'Synthetic speech'
+  }]);
+  expect(completed.diarizer).toEqual({ model: 'synthetic-model', revision: 'test-revision' });
 });
