@@ -31,14 +31,22 @@ export class OpenAITranscriptionWorker {
 
   async enqueue(recordingId: string): Promise<TranscriptionJob> {
     const recording = await this.recordings.getRecording(recordingId);
-    if (!recording || recording.syncState !== 'uploaded' || !recording.objectKey) {
-      throw new Error('Only a durably uploaded recording can be queued for transcription.');
+    const audio = recording?.denoisedAnalysisAudio;
+    if (!recording || recording.syncState !== 'uploaded' || !recording.objectKey
+      || audio?.state !== 'ready' || audio.sampleRateHz !== 48_000 || audio.syncState !== 'uploaded'
+      || !audio.objectKey || !audio.sha256 || !audio.mimeType || !audio.durationSeconds) {
+      throw new Error('Only a durably uploaded recording with a denoised analysis audio artifact can be queued for transcription.');
     }
-    const job = await this.jobs.enqueue(recordingId, OPENAI_TRANSCRIPTION_MODEL, 'diarized');
+    const artifact = { objectKey: audio.objectKey, sha256: audio.sha256 };
+    const job = await this.jobs.enqueue(recordingId, OPENAI_TRANSCRIPTION_MODEL, 'diarized', artifact);
     // A deletion may finish while a transcript request is queueing work.
-    if (!await this.recordings.getRecording(recordingId)) {
+    const latest = await this.recordings.getRecording(recordingId);
+    if (!latest) {
       await this.jobs.delete(recordingId);
       throw new Error('The recording was deleted before transcription could be queued.');
+    }
+    if (latest.denoisedAnalysisAudio?.objectKey !== artifact.objectKey || latest.denoisedAnalysisAudio.sha256 !== artifact.sha256) {
+      throw new Error('The denoised analysis audio changed before transcription could be queued.');
     }
     return job;
   }
@@ -71,13 +79,15 @@ export class OpenAITranscriptionWorker {
 
     try {
       const recording = await this.recordings.getRecording(job.recordingId);
-      if (!this.isStored(recording)) {
+      if (!this.isStored(recording) || !this.isDenoisedStored(recording)
+        || job.analysisAudioObjectKey !== recording.denoisedAnalysisAudio.objectKey
+        || job.analysisAudioSha256 !== recording.denoisedAnalysisAudio.sha256) {
         const failed = await this.jobs.markFailed({
           recordingId: job.recordingId,
           attempt: job.attempts,
-          errorCode: 'recording_not_stored',
-          errorMessage: 'The recording is not available in configured storage.',
-          retryable: true
+          errorCode: 'denoised_audio_unavailable',
+          errorMessage: 'The bound denoised analysis audio is unavailable or has changed. Pyannote did not receive the original recording.',
+          retryable: false
         });
         if (!failed) return { state: 'not_ready' };
         await this.recordings.transitionAnalysisState(job.recordingId, 'error');
@@ -87,12 +97,13 @@ export class OpenAITranscriptionWorker {
       if (recording.analysisState === 'not_started' || recording.analysisState === 'error' || recording.analysisState === 'ready') {
         await this.recordings.transitionAnalysisState(recording.id, 'transcribing');
       }
-      const bytes = await this.storage.readFinal(recording.objectKey, recording.storageDriver);
+      const analysisAudio = recording.denoisedAnalysisAudio;
+      const bytes = await this.storage.readFinal(analysisAudio.objectKey, recording.storageDriver);
       await renew();
       // All jobs, including legacy jobs without a stored mode, must obtain their
       // speaker timeline from pyannote through Modal before OpenAI transcribes clips.
       const result = await this.diarized.transcribe({
-        job, bytes, mimeType: recording.mimeType, provider: this.provider, signal: controller.signal,
+        job, bytes, mimeType: analysisAudio.mimeType ?? recording.mimeType, expectedDurationSeconds: analysisAudio.durationSeconds, provider: this.provider, signal: controller.signal,
         checkpoint: (stage, diarization) => renew({stage, diarization})
       });
       controller.signal.throwIfAborted();
@@ -134,5 +145,13 @@ export class OpenAITranscriptionWorker {
 
   private isStored(recording: RecordingMetadata | undefined): recording is RecordingMetadata & { objectKey: string } {
     return Boolean(recording && recording.syncState === 'uploaded' && recording.objectKey);
+  }
+
+  private isDenoisedStored(recording: RecordingMetadata): recording is RecordingMetadata & {
+    denoisedAnalysisAudio: NonNullable<RecordingMetadata['denoisedAnalysisAudio']> & { objectKey: string; sha256: string; durationSeconds: number }
+  } {
+    const audio = recording.denoisedAnalysisAudio;
+    return Boolean(audio && audio.state === 'ready' && audio.sampleRateHz === 48_000
+      && audio.syncState === 'uploaded' && audio.objectKey && audio.sha256 && audio.durationSeconds);
   }
 }

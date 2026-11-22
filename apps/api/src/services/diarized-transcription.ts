@@ -75,12 +75,20 @@ export class DiarizedTranscriptionPipeline {
     job: TranscriptionJob;
     bytes: Uint8Array;
     mimeType: string;
+    expectedDurationSeconds?: number;
     provider: AudioTranscriptionProvider;
     checkpoint: Checkpoint;
     signal: AbortSignal;
   }) {
     const { job, bytes, mimeType, provider, checkpoint, signal } = input;
     const pcm = await decodeRecording(bytes, mimeType, signal);
+    if (input.expectedDurationSeconds !== undefined) {
+      const decodedDurationSeconds = pcm.length / (SAMPLE_RATE * 2);
+      const toleranceSeconds = Math.max(2, Math.min(5, input.expectedDurationSeconds * 0.05));
+      if (Math.abs(decodedDurationSeconds - input.expectedDurationSeconds) > toleranceSeconds) {
+        throw new AudioTranscriptionError('denoised_audio_duration_mismatch', 'The denoised analysis audio duration did not match its registered metadata.');
+      }
+    }
     const audioSha256 = createHash('sha256').update(pcm).digest('hex');
     let progress = job.diarization ?? { audioSha256 };
     if (progress.audioSha256 && progress.audioSha256 !== audioSha256) {

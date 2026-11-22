@@ -29,6 +29,7 @@ export type TranscriptionFailureCode =
   | 'provider_not_configured'
   | 'unsupported_audio_format'
   | 'audio_too_large'
+  | 'denoised_audio_duration_mismatch'
   | 'empty_audio'
   | 'provider_rejected_audio'
   | 'provider_unavailable'

@@ -3,9 +3,12 @@ import { createApp } from './app';
 import { MongoAdminAuthService } from './auth/admin-auth';
 import { createMongoRecordingRepository } from './repositories/mongo-recording-repository';
 import { createMongoTranscriptionRepository } from './repositories/mongo-transcription-repository';
+import { createMongoConversationAnalysisRepository } from './repositories/mongo-conversation-analysis-repository';
 import { DiarizedTranscriptionPipeline } from './services/diarized-transcription';
 import { ModalDiarizationClient, readModalDiarizationConfig } from './services/modal-diarization';
 import { OpenAITranscriptionWorker } from './services/openai-transcription-worker';
+import { ConversationAnalysisWorker } from './services/conversation-analysis-worker';
+import { OpenAIConversationAnalyzer } from './services/openai-conversation-analysis';
 import { OpenAIAudioTranscriptionProvider, readOpenAITranscriptionConfig } from './services/openai-transcription';
 import { readMongoConfig, readStorageConfig } from './services/storage/config';
 import { createRecordingStorage } from './services/storage/recording-storage';
@@ -31,6 +34,7 @@ async function start(): Promise<void> {
   const database = mongoClient.db(mongo.database);
   const repository = await createMongoRecordingRepository(database);
   const transcriptionJobs = await createMongoTranscriptionRepository(database);
+  const conversationAnalyses = await createMongoConversationAnalysisRepository(database);
   const adminAuth = new MongoAdminAuthService(database, {
     cookieSecure: Bun.env.NODE_ENV === 'production'
   });
@@ -43,7 +47,13 @@ async function start(): Promise<void> {
     new OpenAIAudioTranscriptionProvider(),
     diarized
   );
-  const app = createApp(repository, undefined, undefined, undefined, storage, adminAuth, transcriptionWorker, transcriptionJobs);
+  const conversationAnalysisWorker = new ConversationAnalysisWorker(
+    conversationAnalyses,
+    repository,
+    transcriptionJobs,
+    new OpenAIConversationAnalyzer()
+  );
+  const app = createApp(repository, undefined, undefined, undefined, storage, adminAuth, transcriptionWorker, transcriptionJobs, conversationAnalyses, conversationAnalysisWorker);
 
   let draining = false;
   const drainTranscriptionQueue = async () => {
@@ -55,6 +65,17 @@ async function start(): Promise<void> {
       }
       while (true) {
         const result = await transcriptionWorker.runNext();
+        if (result.state === 'not_ready' || result.state === 'busy') break;
+        if (result.state === 'completed') {
+          await conversationAnalysisWorker.enqueue(result.job.recordingId);
+          await conversationAnalysisWorker.runNext(result.job.recordingId);
+        }
+      }
+      for (const id of await conversationAnalyses.findTranscriptionsWithoutAnalysis()) {
+        await conversationAnalysisWorker.enqueue(id);
+      }
+      while (true) {
+        const result = await conversationAnalysisWorker.runNext();
         if (result.state === 'not_ready' || result.state === 'busy') break;
       }
     } catch (error) {

@@ -1,5 +1,12 @@
 import { Elysia, t } from 'elysia';
-import type { AnalysisState, ManualTranscriptAnalysis, RecordingMetadata, RecordingTranscript, SyncState } from '@itc/domain';
+import type {
+  AnalysisState,
+  ManualTranscriptAnalysis,
+  RecordingConversationAnalysis,
+  RecordingMetadata,
+  RecordingTranscript,
+  SyncState
+} from '@itc/domain';
 import {
   ADMIN_SESSION_MAX_AGE_SECONDS,
   isAllowedManagerOrigin,
@@ -22,6 +29,10 @@ import { readStorageConfig } from './services/storage/config';
 import type { TranscriptionJobRepository } from './repositories/mongo-transcription-repository';
 import type { OpenAITranscriptionWorker } from './services/openai-transcription-worker';
 import { OPENAI_TRANSCRIPTION_MODEL, readOpenAITranscriptionConfig } from './services/openai-transcription';
+import type { ConversationAnalysisWorker } from './services/conversation-analysis-worker';
+import type { MongoConversationAnalysisRepository } from './repositories/mongo-conversation-analysis-repository';
+import { emptyConversationAnalysis } from './repositories/mongo-conversation-analysis-repository';
+import { CONVERSATION_ANALYSIS_VERSION, OPENAI_CONVERSATION_ANALYSIS_MODEL } from './services/openai-conversation-analysis';
 import { readModalDiarizationConfig } from './services/modal-diarization';
 import {
   S3RecordingUploads
@@ -64,6 +75,27 @@ const analysisStateSchema = t.Union([
   t.Literal('error')
 ]);
 
+const denoisingStateSchema = t.Union([
+  t.Literal('not_started'), t.Literal('initializing'), t.Literal('processing'), t.Literal('ready'),
+  t.Literal('failed'), t.Literal('unsupported'), t.Literal('incomplete')
+]);
+const conversationAnalysisStateSchema = t.Union([
+  t.Literal('not_started'), t.Literal('queued'), t.Literal('processing'), t.Literal('completed'), t.Literal('failed')
+]);
+const denoisedAnalysisAudioSchema = t.Object({
+  state: denoisingStateSchema,
+  syncState: t.Optional(syncStateSchema),
+  objectKey: t.Optional(t.String()),
+  mimeType: t.Optional(t.String()),
+  byteLength: t.Optional(t.Number()),
+  sha256: t.Optional(t.String()),
+  sampleRateHz: t.Optional(t.Number()),
+  durationSeconds: t.Optional(t.Number()),
+  model: t.Optional(t.String()),
+  modelVersion: t.Optional(t.String()),
+  errorCode: t.Optional(t.String())
+});
+
 const errorSchema = t.Object({
   code: t.String(),
   message: t.String()
@@ -93,7 +125,9 @@ const recordingSchema = t.Object({
   storageDriver: t.Optional(t.Union([t.Literal('local'), t.Literal('s3')])),
   sha256: t.Optional(t.String()),
   syncState: syncStateSchema,
-  analysisState: analysisStateSchema
+  analysisState: analysisStateSchema,
+  denoisedAnalysisAudio: t.Optional(denoisedAnalysisAudioSchema),
+  conversationAnalysisState: t.Optional(conversationAnalysisStateSchema)
 });
 
 const recordingPageSchema = t.Object({
@@ -105,7 +139,8 @@ const recordingPageSchema = t.Object({
 const analysisStatusSchema = t.Object({
   id: t.String(),
   syncState: syncStateSchema,
-  analysisState: analysisStateSchema
+  analysisState: analysisStateSchema,
+  conversationAnalysisState: t.Optional(conversationAnalysisStateSchema)
 });
 
 const recordingTranscriptSchema = t.Object({
@@ -138,6 +173,69 @@ const recordingTranscriptSchema = t.Object({
   retryable: t.Optional(t.Boolean())
 });
 
+const insightEvidenceSchema = t.Object({
+  segmentIds: t.Array(t.String()),
+  quote: t.String(),
+  startMs: t.Optional(t.Number()),
+  endMs: t.Optional(t.Number())
+});
+const confidenceSchema = t.Union([t.Literal('high'), t.Literal('medium'), t.Literal('low')]);
+const explicitnessSchema = t.Union([t.Literal('explicit'), t.Literal('inferred'), t.Literal('uncertain')]);
+const insightCategorySchema = t.Union([
+  t.Literal('demand'), t.Literal('objection'), t.Literal('availability'), t.Literal('competitor'),
+  t.Literal('sentiment'), t.Literal('commitment'), t.Literal('conversation_quality')
+]);
+const conversationAnalysisSchema = t.Object({
+  recordingId: t.String(), state: conversationAnalysisStateSchema, provider: t.Literal('openai'),
+  model: t.String(), analysisVersion: t.String(), createdAt: t.String(), updatedAt: t.String(),
+  completedAt: t.Optional(t.String()),
+  outcome: t.Union([t.Literal('order_placed'), t.Literal('follow_up'), t.Literal('no_order'), t.Literal('new_outlet'), t.Literal('not_stated')]),
+  outcomeConfidence: confidenceSchema, outcomeExplicitness: explicitnessSchema, outcomeEvidence: t.Array(insightEvidenceSchema),
+  summary: t.Optional(t.String()),
+  confirmedOrders: t.Array(t.Object({
+    id: t.String(), intent: t.Union([t.Literal('confirmed'), t.Literal('conditional'), t.Literal('considering'), t.Literal('declined'), t.Literal('unknown')]),
+    productName: t.Optional(t.String()), brand: t.Optional(t.String()), packDescription: t.Optional(t.String()),
+    quantity: t.Optional(t.Number()), quantityUnit: t.Optional(t.String()), unitPriceInr: t.Optional(t.Number()), totalValueInr: t.Optional(t.Number()),
+    confidence: confidenceSchema, evidence: t.Array(insightEvidenceSchema)
+  })),
+  salesSignals: t.Array(t.Object({
+    id: t.String(), category: insightCategorySchema, title: t.String(), summary: t.String(), confidence: confidenceSchema,
+    evidence: t.Array(insightEvidenceSchema), suggestedAction: t.Optional(t.String()), reviewedAt: t.Optional(t.String()), reviewedBy: t.Optional(t.String()),
+    taxonomyKey: t.String(), mentionCount: t.Number(), explicitness: explicitnessSchema,
+    productName: t.Optional(t.String()), brand: t.Optional(t.String()), packDescription: t.Optional(t.String()),
+    explicitCount: t.Optional(t.Number()), countUnit: t.Optional(t.String()),
+    status: t.Optional(t.Union([t.Literal('reported'), t.Literal('conditional'), t.Literal('unverified'), t.Literal('resolved'), t.Literal('unknown')]))
+  })),
+  sentimentCue: t.Union([t.Literal('positive'), t.Literal('neutral'), t.Literal('hesitant'), t.Literal('at_risk'), t.Literal('unknown')]),
+  sentimentConfidence: confidenceSchema, nextAction: t.Optional(t.String()), nextActionDue: t.Optional(t.String()),
+  nextActionEvidence: t.Array(insightEvidenceSchema),
+  coachingSignals: t.Array(t.Object({
+    rubricKey: t.Union([t.Literal('discovery'), t.Literal('benefit_explanation'), t.Literal('objection_response'), t.Literal('close_or_next_step')]),
+    label: t.String(), confidence: confidenceSchema, evidenceSegmentIds: t.Array(t.String()), note: t.String()
+  })),
+  errorCode: t.Optional(t.String()), errorMessage: t.Optional(t.String()), retryable: t.Optional(t.Boolean())
+});
+const countByConfidenceSchema = t.Object({ high: t.Number(), medium: t.Number(), low: t.Number() });
+const countByExplicitnessSchema = t.Object({ explicit: t.Number(), inferred: t.Number(), uncertain: t.Number() });
+const conversationAnalysisReportSchema = t.Object({
+  generatedAt: t.String(),
+  filters: t.Object({ from: t.Optional(t.String()), to: t.Optional(t.String()), territoryId: t.Optional(t.String()), representativeId: t.Optional(t.String()) }),
+  captureCount: t.Number(), analyzedRecordingCount: t.Number(), pendingRecordingCount: t.Number(), failedRecordingCount: t.Number(),
+  outcomeCounts: t.Object({ order_placed: t.Number(), follow_up: t.Number(), no_order: t.Number(), new_outlet: t.Number(), not_stated: t.Number() }),
+  confirmedOrderCount: t.Number(), confirmedOrdersWithValueCount: t.Number(), confirmedOrderValueInr: t.Number(),
+  signals: t.Array(t.Object({
+    taxonomyKey: t.String(), category: insightCategorySchema, mentionCount: t.Number(), recordingCount: t.Number(), outletCount: t.Number(),
+    confidenceCounts: countByConfidenceSchema, explicitnessCounts: countByExplicitnessSchema
+  })),
+  followUps: t.Object({ actionCount: t.Number(), datedActionCount: t.Number(), overdueActionCount: t.Number() }),
+  evidenceCoverage: t.Object({
+    findingCount: t.Number(), evidenceLinkedFindingCount: t.Number(), highConfidenceFindingCount: t.Number(),
+    mediumConfidenceFindingCount: t.Number(), lowConfidenceFindingCount: t.Number(), uncertainFindingCount: t.Number()
+  }),
+  territories: t.Array(t.Object({ id: t.String(), name: t.Optional(t.String()), recordingCount: t.Number(), analyzedRecordingCount: t.Number() })),
+  representatives: t.Array(t.Object({ id: t.String(), name: t.Optional(t.String()), recordingCount: t.Number(), analyzedRecordingCount: t.Number() }))
+});
+
 const createVisitBody = t.Object({
   id: t.String({ minLength: 1, maxLength: 128 }),
   outletName: t.Optional(t.String({ minLength: 1, maxLength: 200 })),
@@ -151,7 +249,18 @@ const createRecordingBody = t.Object({
   startedAt: t.String({ format: 'date-time' }),
   durationSeconds: t.Number({ minimum: 0, maximum: 60 * 60 * 8 }),
   mimeType: t.String({ minLength: 1, maxLength: 128 }),
-  byteLength: t.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER })
+  byteLength: t.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+  denoisedAnalysisAudio: t.Optional(t.Object({
+    state: denoisingStateSchema,
+    mimeType: t.Optional(t.String({ minLength: 1, maxLength: 128 })),
+    byteLength: t.Optional(t.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER })),
+    sha256: t.Optional(t.String({ pattern: '^[a-f0-9]{64}$' })),
+    sampleRateHz: t.Optional(t.Number({ minimum: 1, maximum: 192000 })),
+    durationSeconds: t.Optional(t.Number({ minimum: 0, maximum: 60 * 60 * 8 })),
+    model: t.Optional(t.String({ maxLength: 128 })),
+    modelVersion: t.Optional(t.String({ maxLength: 128 })),
+    errorCode: t.Optional(t.String({ maxLength: 128 }))
+  }))
 });
 
 const recordingParams = t.Object({ recordingId: t.String({ minLength: 1, maxLength: 128 }) });
@@ -165,6 +274,12 @@ const recordingQuery = t.Object({
   territoryId: t.Optional(t.String({ minLength: 1, maxLength: 128 })),
   limit: t.Optional(t.Numeric({ minimum: 1, maximum: 100 })),
   offset: t.Optional(t.Numeric({ minimum: 0, maximum: 100000 }))
+});
+const conversationAnalysisReportQuery = t.Object({
+  from: t.Optional(t.String({ pattern: '^\\d{4}-\\d{2}-\\d{2}$' })),
+  to: t.Optional(t.String({ pattern: '^\\d{4}-\\d{2}-\\d{2}$' })),
+  territoryId: t.Optional(t.String({ minLength: 1, maxLength: 128 })),
+  representativeId: t.Optional(t.String({ minLength: 1, maxLength: 128 }))
 });
 
 const uploadUnavailableSchema = t.Object({ code: t.String(), message: t.String() });
@@ -311,7 +426,9 @@ export function createApp(
   recordingStorage: RecordingObjectStorage = createRecordingStorage(readStorageConfig()),
   adminAuth?: AdminAuthService,
   transcriptionWorker?: OpenAITranscriptionWorker,
-  transcriptionJobs?: TranscriptionJobRepository
+  transcriptionJobs?: TranscriptionJobRepository,
+  conversationAnalyses?: MongoConversationAnalysisRepository,
+  conversationAnalysisWorker?: ConversationAnalysisWorker
 ) {
   const managerOrigin = readManagerOrigin();
   const sessionCookieSchema = t.Object({
@@ -329,12 +446,26 @@ export function createApp(
   };
   const unauthorizedAdmin = { code: 'admin_auth_required', message: 'Sign in with the administrator account to continue.' };
   const unavailableAuth = { code: 'admin_auth_unavailable', message: 'Administrator authentication is not configured on this API.' };
+  const denoisedArtifactFor = (recording: RecordingMetadata) => {
+    const audio = recording.denoisedAnalysisAudio;
+    return audio?.state === 'ready' && audio.sampleRateHz === 48_000 && audio.syncState === 'uploaded'
+      && audio.objectKey && audio.sha256 && audio.durationSeconds
+      ? { objectKey: audio.objectKey, sha256: audio.sha256 }
+      : undefined;
+  };
+  const runTranscriptionAndAnalysis = async (recordingId: string): Promise<void> => {
+    if (!transcriptionWorker) return;
+    const result = await transcriptionWorker.runNext(recordingId);
+    if (result.state !== 'completed' || !conversationAnalysisWorker) return;
+    const analysis = await conversationAnalysisWorker.enqueue(recordingId);
+    if (analysis.state === 'queued') await conversationAnalysisWorker.runNext(recordingId);
+  };
   const scheduleTranscription = async (recordingId: string): Promise<void> => {
     if (!transcriptionWorker || !transcriptionJobs) return;
     try {
       const job = await transcriptionWorker.enqueue(recordingId);
       if (job.state === 'queued') {
-        void transcriptionWorker.runNext(recordingId).catch((error: unknown) => {
+        void runTranscriptionAndAnalysis(recordingId).catch((error: unknown) => {
           console.error(`Transcription worker failed for recording ${recordingId}:`, error);
         });
       }
@@ -346,11 +477,22 @@ export function createApp(
   const transcriptFor = async (recordingId: string, recording: RecordingMetadata): Promise<RecordingTranscript> => {
     const job = await transcriptionJobs?.get(recordingId);
     if (job) {
-      const { diarization: _checkpoint, mode: _mode, ...transcript } = job;
+      const {
+        diarization: _checkpoint, mode: _mode,
+        analysisAudioObjectKey: _analysisAudioObjectKey, analysisAudioSha256: _analysisAudioSha256,
+        ...transcript
+      } = job;
       return {
         ...transcript,
         // Legacy whole-file transcripts can be upgraded to pyannote turns.
-        canReprocess: job.state === 'completed' && !job.diarizer
+        canReprocess: Boolean(recording.denoisedAnalysisAudio?.state === 'ready'
+          && recording.denoisedAnalysisAudio.sampleRateHz === 48_000
+          && recording.denoisedAnalysisAudio.syncState === 'uploaded'
+          && recording.denoisedAnalysisAudio.objectKey && recording.denoisedAnalysisAudio.sha256
+          && ((job.state === 'completed' && !job.diarizer)
+            || (job.state === 'failed'
+              && (job.analysisAudioObjectKey !== recording.denoisedAnalysisAudio.objectKey
+                || job.analysisAudioSha256 !== recording.denoisedAnalysisAudio.sha256))))
       };
     }
     const createdAt = new Date(recording.startedAt).toISOString();
@@ -363,6 +505,15 @@ export function createApp(
       createdAt,
       updatedAt: createdAt
     };
+  };
+  const conversationAnalysisFor = async (recordingId: string, recording: RecordingMetadata): Promise<RecordingConversationAnalysis> => {
+    const existing = await conversationAnalyses?.get(recordingId);
+    if (existing) return existing;
+    if (recording.syncState === 'uploaded' && !recording.denoisedAnalysisAudio?.objectKey) {
+      const unavailable = emptyConversationAnalysis(recordingId, OPENAI_CONVERSATION_ANALYSIS_MODEL, CONVERSATION_ANALYSIS_VERSION);
+      return { ...unavailable, state: 'failed', errorCode: 'denoised_audio_unavailable', errorMessage: 'Denoised analysis audio is unavailable. The original recording was not sent to Pyannote.' };
+    }
+    return emptyConversationAnalysis(recordingId, OPENAI_CONVERSATION_ANALYSIS_MODEL, CONVERSATION_ANALYSIS_VERSION);
   };
 
   return new Elysia()
@@ -588,10 +739,20 @@ export function createApp(
       response: {
         200: recordingSchema,
         201: recordingSchema,
+        400: errorSchema,
         404: errorSchema,
         409: errorSchema
       }
     }, async ({ params, body, status }) => {
+      const denoised = body.denoisedAnalysisAudio;
+      if (denoised?.state === 'ready'
+        && (!denoised.mimeType || !denoised.byteLength || !denoised.sampleRateHz
+          || denoised.durationSeconds === undefined || !denoised.model || !denoised.modelVersion)) {
+        return status(400, { code: 'denoised_audio_metadata_incomplete', message: 'Ready denoised analysis audio requires MIME type, byte length, sample rate, duration, model, and model version.' });
+      }
+      if (denoised?.state === 'ready' && denoised.sampleRateHz !== 48_000) {
+        return status(400, { code: 'denoised_audio_sample_rate_invalid', message: 'Pyannote input must be the DeepFilterNet 48 kHz analysis audio artifact.' });
+      }
       const result = await repository.createRecording(params.visitId, body);
       if (result.kind === 'parent_not_found') {
         return status(404, {
@@ -675,7 +836,6 @@ export function createApp(
       if (!recording) return status(404, { code: 'recording_not_found', message: 'Recording metadata was not found.' });
       try {
         if (recording.syncState === 'uploaded') {
-          await scheduleTranscription(recording.id);
           return recording;
         }
         const bytes = await localStorage.assemble({
@@ -696,20 +856,93 @@ export function createApp(
           return status(409, { code: 'recording_metadata_mismatch', message: 'Stored audio did not match the registered recording.' });
         }
         await localStorage.removeStaged(recording.id, recording.startedAt, recording.mimeType).catch(() => undefined);
-        await scheduleTranscription(recording.id);
         return completed;
       } catch (error) {
         if (error instanceof UploadStagingError) {
           const completed = await repository.getRecording(recording.id);
-          if (completed) {
-            await scheduleTranscription(recording.id);
-            return completed;
-          }
+          if (completed) return completed;
           return status(409, { code: error.code, message: error.message });
         }
         const name = error instanceof Error ? error.name : 'UnknownError';
         console.error('Recording finalization failed:', name);
         return status(500, { code: 'audio_finalize_failed', message: 'The API could not persist the finalized conversation audio. The device copy remains queued for retry.' });
+      }
+    })
+    .put('/v1/recordings/:recordingId/analysis-audio/:chunkIndex/:chunkCount', {
+      params: recordingChunkParams,
+      response: { 200: t.Object({ received: t.Boolean() }), 400: errorSchema, 404: errorSchema, 409: errorSchema, 500: errorSchema }
+    }, async ({ params, request, status }) => {
+      const recording = await repository.getUploadRecording(params.recordingId);
+      if (!recording) return status(404, { code: 'recording_not_found', message: 'Register visit details before uploading denoised analysis audio.' });
+      if (recording.syncState !== 'uploaded') return status(409, { code: 'recording_not_stored', message: 'Store the original recording before its denoised analysis audio.' });
+      const audio = recording.denoisedAnalysisAudio;
+      if (audio?.state !== 'ready' || audio.sampleRateHz !== 48_000 || !audio.mimeType || !audio.byteLength) {
+        return status(409, { code: 'denoised_audio_unavailable', message: 'This recording has no denoised analysis audio eligible for diarization.' });
+      }
+      if (audio.syncState === 'uploaded' && audio.objectKey) return { received: true };
+      if (!Number.isInteger(params.chunkIndex) || !Number.isInteger(params.chunkCount)
+        || params.chunkCount < 1 || params.chunkIndex < 0 || params.chunkIndex >= params.chunkCount) {
+        return status(409, { code: 'invalid_analysis_audio_chunk', message: 'The analysis audio chunk index or count is invalid.' });
+      }
+      const expectedChunkCount = Math.ceil(audio.byteLength / RECORDING_UPLOAD_CHUNK_BYTES);
+      const expectedChunkLength = Math.min(RECORDING_UPLOAD_CHUNK_BYTES, audio.byteLength - params.chunkIndex * RECORDING_UPLOAD_CHUNK_BYTES);
+      if (params.chunkCount !== expectedChunkCount || params.chunkIndex >= expectedChunkCount) {
+        return status(409, { code: 'invalid_analysis_audio_chunk', message: 'The analysis audio chunk size or count does not match its registered metadata.' });
+      }
+      let bytes: Uint8Array;
+      try { bytes = await readBoundedAudioChunk(request); }
+      catch (error) {
+        if (error instanceof UploadStagingError) return status(409, { code: error.code, message: error.message });
+        return status(400, { code: 'analysis_audio_chunk_invalid', message: 'The denoised audio chunk could not be read. Retry from the device.' });
+      }
+      if (bytes.byteLength !== expectedChunkLength) return status(409, { code: 'invalid_analysis_audio_chunk', message: 'The analysis audio chunk size does not match its registered metadata.' });
+      try {
+        await localStorage.saveChunk({
+          id: recording.id, startedAt: recording.startedAt, mimeType: audio.mimeType,
+          index: params.chunkIndex, total: params.chunkCount, expectedByteLength: audio.byteLength,
+          bytes, artifact: 'analysis'
+        });
+        return { received: true };
+      } catch (error) {
+        if (error instanceof UploadStagingError) return status(409, { code: error.code, message: error.message });
+        return status(500, { code: 'analysis_audio_chunk_store_failed', message: 'The API could not safely stage denoised audio. The original recording remains stored.' });
+      }
+    })
+    .post('/v1/recordings/:recordingId/analysis-audio/complete', {
+      params: recordingParams,
+      response: { 200: recordingSchema, 404: errorSchema, 409: errorSchema, 500: errorSchema, 503: errorSchema }
+    }, async ({ params, status }) => {
+      const recording = await repository.getRecording(params.recordingId);
+      if (!recording) return status(404, { code: 'recording_not_found', message: 'The original recording is not durably stored.' });
+      const audio = recording.denoisedAnalysisAudio;
+      if (audio?.state !== 'ready' || audio.sampleRateHz !== 48_000 || !audio.mimeType || !audio.byteLength) {
+        return status(409, { code: 'denoised_audio_unavailable', message: 'This recording has no denoised analysis audio eligible for diarization.' });
+      }
+      if (audio.syncState === 'uploaded' && audio.objectKey && audio.sha256) {
+        await scheduleTranscription(recording.id);
+        return recording;
+      }
+      try {
+        const bytes = await localStorage.assemble({
+          id: recording.id, startedAt: recording.startedAt, mimeType: audio.mimeType,
+          expectedByteLength: audio.byteLength, artifact: 'analysis'
+        });
+        const stored = await recordingStorage.putFinal({
+          id: recording.id, startedAt: recording.startedAt, mimeType: audio.mimeType,
+          bytes, artifact: 'analysis'
+        });
+        const completed = await repository.completeDenoisedAnalysisAudio(recording.id, stored);
+        if (!completed) {
+          await recordingStorage.deleteFinal(stored.objectKey, stored.driver).catch(() => undefined);
+          return status(409, { code: 'analysis_audio_metadata_mismatch', message: 'Stored denoised audio did not match the registered metadata.' });
+        }
+        await localStorage.removeStaged(recording.id, recording.startedAt, audio.mimeType, 'analysis').catch(() => undefined);
+        await scheduleTranscription(recording.id);
+        return completed;
+      } catch (error) {
+        if (error instanceof UploadStagingError) return status(409, { code: error.code, message: error.message });
+        console.error('Denoised analysis audio finalization failed:', error instanceof Error ? error.name : 'UnknownError');
+        return status(500, { code: 'analysis_audio_finalize_failed', message: 'The API could not persist denoised analysis audio. The original recording remains stored for retry.' });
       }
     })
     .delete('/v1/recordings/:recordingId', {
@@ -729,10 +962,17 @@ export function createApp(
           if (recording.objectKey && recording.storageDriver) {
             await recordingStorage.deleteFinal(recording.objectKey, recording.storageDriver);
           }
+          if (recording.denoisedAnalysisAudio?.objectKey && recording.storageDriver) {
+            await recordingStorage.deleteFinal(recording.denoisedAnalysisAudio.objectKey, recording.storageDriver);
+          }
           await localStorage.removeStaged(id, recording.startedAt, recording.mimeType);
+          if (recording.denoisedAnalysisAudio?.mimeType) {
+            await localStorage.removeStaged(id, recording.startedAt, recording.denoisedAnalysisAudio.mimeType, 'analysis');
+          }
           await repository.deleteRecording(id);
         }
         await transcriptionJobs?.delete(id);
+        await conversationAnalyses?.delete(id);
         return { ok: true };
       } catch (error) {
         console.error('Recording deletion failed:', error instanceof Error ? error.name : 'UnknownError');
@@ -834,10 +1074,10 @@ export function createApp(
       const recording = await repository.getRecording(params.recordingId);
       if (!recording) return status(404, { code: 'recording_not_found', message: 'The requested recording does not exist.' });
       if (recording.syncState !== 'uploaded') return status(409, { code: 'recording_not_stored', message: 'Transcription is available after the audio is durably stored.' });
-      try {
+      if (denoisedArtifactFor(recording)) try {
         await scheduleTranscription(recording.id);
       } catch {
-        // The stored audio remains available; the manager can retry after API configuration is fixed.
+        // The original remains stored; clean-only queueing is retried after configuration is fixed.
       }
       return transcriptFor(recording.id, recording);
     })
@@ -861,12 +1101,16 @@ export function createApp(
       const recording = await repository.getRecording(params.recordingId);
       if (!recording) return status(404, { code: 'recording_not_found', message: 'The requested recording does not exist.' });
       if (recording.syncState !== 'uploaded') return status(409, { code: 'recording_not_stored', message: 'Transcription can be retried after the audio is durably stored.' });
+      const artifact = denoisedArtifactFor(recording);
+      if (!artifact) return status(409, { code: 'denoised_audio_unavailable', message: 'A denoised analysis audio artifact is required. Original audio is never sent to Pyannote.' });
       let job = await transcriptionJobs.get(recording.id);
       if (!job) job = await transcriptionWorker.enqueue(recording.id);
-      else if (job.state === 'failed') job = await transcriptionJobs.retry(recording.id);
+      else if (job.analysisAudioObjectKey !== artifact.objectKey || job.analysisAudioSha256 !== artifact.sha256) {
+        return status(409, { code: 'transcription_artifact_changed', message: 'This transcription is bound to a different denoised audio artifact. Reprocess it to use the current artifact.' });
+      } else if (job.state === 'failed') job = await transcriptionJobs.retry(recording.id);
       if (!job) return status(409, { code: 'transcription_not_retryable', message: 'This transcription is not in a retryable state.' });
       if (job.state !== 'queued') return status(409, { code: 'transcription_not_retryable', message: 'This transcription is not waiting for a retry.' });
-      void transcriptionWorker.runNext(recording.id).catch((error: unknown) => {
+      void runTranscriptionAndAnalysis(recording.id).catch((error: unknown) => {
         console.error(`Transcription retry failed for recording ${recording.id}:`, error);
       });
       return transcriptFor(recording.id, recording);
@@ -885,12 +1129,69 @@ export function createApp(
       }
       const recording = await repository.getRecording(params.recordingId);
       if (!recording) return status(404, { code: 'recording_not_found', message: 'The requested recording does not exist.' });
-      const job = await transcriptionJobs.reprocess(recording.id);
-      if (!job) return status(409, { code: 'transcription_not_completed', message: 'Only a completed transcript can be reprocessed.' });
-      void transcriptionWorker.runNext(recording.id).catch((error: unknown) => {
+      const artifact = denoisedArtifactFor(recording);
+      if (!artifact) return status(409, { code: 'denoised_audio_unavailable', message: 'A denoised analysis audio artifact is required. Original audio is never sent to Pyannote.' });
+      const job = await transcriptionJobs.reprocess(recording.id, artifact);
+      if (!job) return status(409, { code: 'transcription_not_reprocessable', message: 'Only a completed legacy transcript or failed job with a changed denoised artifact can be reprocessed.' });
+      void runTranscriptionAndAnalysis(recording.id).catch((error: unknown) => {
         console.error(`Could not reprocess recording ${recording.id}:`, error);
       });
       return transcriptFor(recording.id, recording);
+    })
+    .get('/v1/recordings/:recordingId/conversation-analysis', {
+      params: recordingParams,
+      response: { 200: conversationAnalysisSchema, 401: errorSchema, 404: errorSchema, 503: errorSchema }
+    }, async ({ params, request, status }) => {
+      if (!adminAuth) return status(503, unavailableAuth);
+      if (!await hasAdminSession(request)) return status(401, unauthorizedAdmin);
+      const recording = await repository.getRecording(params.recordingId);
+      if (!recording) return status(404, { code: 'recording_not_found', message: 'The requested recording does not exist.' });
+      return conversationAnalysisFor(recording.id, recording);
+    })
+    .post('/v1/recordings/:recordingId/conversation-analysis/retry', {
+      params: recordingParams,
+      response: { 200: conversationAnalysisSchema, 401: errorSchema, 403: errorSchema, 404: errorSchema, 409: errorSchema, 503: errorSchema }
+    }, async ({ params, request, status }) => {
+      if (!adminAuth) return status(503, unavailableAuth);
+      if (!await hasAdminSession(request)) return status(401, unauthorizedAdmin);
+      if (!isAllowedManagerOrigin(request, managerOrigin)) return status(403, { code: 'admin_origin_rejected', message: 'The administrator request origin is not allowed.' });
+      if (!conversationAnalysisWorker) return status(503, { code: 'conversation_analysis_unavailable', message: 'Conversation analysis is not configured on the API server.' });
+      const recording = await repository.getRecording(params.recordingId);
+      if (!recording) return status(404, { code: 'recording_not_found', message: 'The requested recording does not exist.' });
+      if (!denoisedArtifactFor(recording)) return status(409, { code: 'denoised_audio_unavailable', message: 'Denoised analysis audio is required. Original audio is never sent to Pyannote.' });
+      const analysis = await conversationAnalysisWorker.retry(recording.id).catch(() => undefined);
+      if (!analysis) return status(409, { code: 'conversation_analysis_not_retryable', message: 'This conversation analysis is not in a retryable state.' });
+      if (analysis.state === 'queued') void conversationAnalysisWorker.runNext(recording.id).catch((error: unknown) => {
+        console.error(`Conversation analysis retry failed for recording ${recording.id}:`, error);
+      });
+      return analysis;
+    })
+    .post('/v1/recordings/:recordingId/conversation-analysis/reprocess', {
+      params: recordingParams,
+      response: { 200: conversationAnalysisSchema, 401: errorSchema, 403: errorSchema, 404: errorSchema, 409: errorSchema, 503: errorSchema }
+    }, async ({ params, request, status }) => {
+      if (!adminAuth) return status(503, unavailableAuth);
+      if (!await hasAdminSession(request)) return status(401, unauthorizedAdmin);
+      if (!isAllowedManagerOrigin(request, managerOrigin)) return status(403, { code: 'admin_origin_rejected', message: 'The administrator request origin is not allowed.' });
+      if (!conversationAnalysisWorker) return status(503, { code: 'conversation_analysis_unavailable', message: 'Conversation analysis is not configured on the API server.' });
+      const recording = await repository.getRecording(params.recordingId);
+      if (!recording) return status(404, { code: 'recording_not_found', message: 'The requested recording does not exist.' });
+      if (!denoisedArtifactFor(recording)) return status(409, { code: 'denoised_audio_unavailable', message: 'Denoised analysis audio is required. Original audio is never sent to Pyannote.' });
+      const analysis = await conversationAnalysisWorker.reprocess(recording.id).catch(() => undefined);
+      if (!analysis) return status(409, { code: 'conversation_analysis_not_completed', message: 'Only completed conversation analysis can be reprocessed.' });
+      if (analysis.state === 'queued') void conversationAnalysisWorker.runNext(recording.id).catch((error: unknown) => {
+        console.error(`Conversation analysis reprocess failed for recording ${recording.id}:`, error);
+      });
+      return analysis;
+    })
+    .get('/v1/reports/conversation-analysis', {
+      query: conversationAnalysisReportQuery,
+      response: { 200: conversationAnalysisReportSchema, 401: errorSchema, 503: errorSchema }
+    }, async ({ query, request, status }) => {
+      if (!adminAuth) return status(503, unavailableAuth);
+      if (!await hasAdminSession(request)) return status(401, unauthorizedAdmin);
+      if (!conversationAnalyses) return status(503, { code: 'conversation_analysis_unavailable', message: 'Conversation analysis storage is not configured on the API server.' });
+      return conversationAnalyses.buildReport(query);
     })
     .get('/v1/recordings/:recordingId', {
       params: recordingParams,
