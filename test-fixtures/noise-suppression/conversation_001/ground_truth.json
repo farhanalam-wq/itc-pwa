@@ -1,0 +1,13 @@
+{
+  "synthetic": true,
+  "note": "Scenario-level expected facts. Check generated transcript supports each fact before using as gold-standard labels.",
+  "product": "Sunfeast Dark Fantasy",
+  "scenario": "trial_order",
+  "expected_business_facts": {
+    "retailer_observation": "Small low-ticket biscuit packs sell faster locally than expensive larger packs.",
+    "objection": "The owner is worried that premium packs will remain unsold.",
+    "outcome": "The shopkeeper agrees to trial a small quantity, conditional on checking actual movement later.",
+    "status": "trial_accepted"
+  },
+  "actual_sales_performance": "unknown"
+}
