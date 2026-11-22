@@ -1,12 +1,5 @@
 """Produce Community-1 intervals on the same PCM samples used by the clipper."""
 
-import argparse
-import json
-import os
-import sys
-from contextlib import redirect_stdout
-from pathlib import Path
-
 MODEL = "pyannote/speaker-diarization-community-1"
 SAMPLE_RATE = 16_000
 
@@ -56,25 +49,3 @@ def diarize_pcm(pipeline, pcm):
         (segment, {}) for segment in result.speaker_diarization.get_overlap()
     ))
     return {"source": MODEL, "turns": turns, "overlaps": overlaps}
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("pcm", type=Path, help="16 kHz mono signed 16-bit PCM")
-    args = parser.parse_args()
-    token = os.environ.get("HF_TOKEN")
-    model_dir = os.environ.get("PYANNOTE_MODEL_DIR")
-
-    if not token and not model_dir:
-        parser.error("Set HF_TOKEN after accepting the model terms, or set PYANNOTE_MODEL_DIR.")
-
-    # Keep dependency/model output separate from the JSON protocol.
-    with redirect_stdout(sys.stderr):
-        pipeline = load_pipeline(model_dir or MODEL, token=token)
-        timeline = diarize_pcm(pipeline, args.pcm.read_bytes())
-
-    print(json.dumps(timeline))
-
-
-if __name__ == "__main__":
-    main()

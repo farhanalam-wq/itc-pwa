@@ -6,16 +6,21 @@ import { createMongoTranscriptionRepository } from './repositories/mongo-transcr
 import { DiarizedTranscriptionPipeline } from './services/diarized-transcription';
 import { ModalDiarizationClient, readModalDiarizationConfig } from './services/modal-diarization';
 import { OpenAITranscriptionWorker } from './services/openai-transcription-worker';
-import { OpenAIAudioTranscriptionProvider } from './services/openai-transcription';
+import { OpenAIAudioTranscriptionProvider, readOpenAITranscriptionConfig } from './services/openai-transcription';
 import { readMongoConfig, readStorageConfig } from './services/storage/config';
 import { createRecordingStorage } from './services/storage/recording-storage';
 
 const port = Number(Bun.env.PORT ?? 3004);
 
 async function start(): Promise<void> {
-  const diarized = Bun.env.OPENAI_TRANSCRIPTION_MODE === 'diarized'
-    ? new DiarizedTranscriptionPipeline(new ModalDiarizationClient(readModalDiarizationConfig()))
-    : undefined;
+  const modalConfig = readModalDiarizationConfig();
+  if (!readOpenAITranscriptionConfig().configured) {
+    throw new Error('OPENAI_API_KEY is required for speech-to-text on diarized audio clips.');
+  }
+  if (!Bun.which('ffmpeg')) {
+    throw new Error('FFmpeg is required to decode recordings for pyannote diarization.');
+  }
+  const diarized = new DiarizedTranscriptionPipeline(new ModalDiarizationClient(modalConfig));
   const mongo = readMongoConfig();
   if (!mongo) {
     throw new Error('MONGODB_URI is required to start the API. Set MONGODB_URI and MONGODB_DATABASE in apps/api/.env.');

@@ -39,7 +39,7 @@ flowchart LR
 | Manual transcript analysis | API accepts consented text and deterministic rules produce a typed evidence-linked report; optional VTT/SRT timings and conversation date are supported. | This is not audio transcription. The rule analyzer must not be presented as an ASR result or used to fabricate a transcript for PWA audio. |
 | API persistence | MongoDB stores visits, recordings, one administrator, sessions, and transcription jobs/transcript text. Audio bytes remain in local/S3 object storage. | Manual text-import report aggregation remains process-local demo data. Live Mongo persistence needs configured service verification. |
 | Authentication | One-time protected administrator bootstrap, password login, expiring hashed sessions, manager route protection, and sign-out are implemented. | One admin only; no tenant model, user roles, or public account signup. |
-| Transcription | Finalized stored audio queues an OpenAI `gpt-transcribe` job; status and transcript text persist in Mongo and manager fetches the result. | No live OpenAI key or external transcription has been exercised here. Files over 25 MiB remain stored but need a later audio segmentation/compression strategy for transcription. |
+| Transcription | Finalized stored audio queues a mandatory pyannote Community-1 diarization job on Modal, followed by OpenAI `gpt-transcribe` requests for speaker clips; job state, speaker turns, and transcript text persist in Mongo. | API startup requires Modal credentials, FFmpeg, and an OpenAI key. No OpenAI diarization is requested. Audio over 10 minutes remains stored but cannot be transcribed by the current diarization service. |
 
 ### Repository inventory at planning time
 
@@ -101,7 +101,7 @@ The user has now approved implementation and requested a commit after every comp
 | 5 — Manager transcript display | Show live recording metadata, transcript state, and actual transcript text in the manager; loading, empty and failure states; synthetic fixtures stay visibly synthetic. | `feat: display recording transcripts in manager` |
 | 6 — End-to-end handoff | Verify local and S3 storage paths where credentials/services are available, offline recovery, Mongo restart persistence, one-object idempotency, OpenAI success/failure, and manager rendering; update runbook and acceptance notes. | `docs: document recording transcription workflow` |
 
-OpenAI implementation constraint from the official speech-to-text guide: `gpt-transcribe` accepts supported audio files including WebM up to 25 MB. Larger conversations must retain one final audio object but be prepared for transcription with an audio-aware server-side split/compression strategy; do not send fabricated speaker labels, timestamps, or confidence when the selected model returns plain transcript text. Store and display the transcript as returned, with provider/model, language only when provided, and job provenance.
+The API retains one final audio object and uses pyannote's speaker timeline to send bounded clips to OpenAI for text recognition. Do not send fabricated speaker labels, timestamps, or confidence when a provider does not supply them. Store and display transcript text with provider/model, diarizer provenance, and language only when supplied.
 
 ### Configuration contract to implement
 
@@ -493,23 +493,23 @@ This log tracks the revised vertical slice above. Each phase is committed before
 | 1 — MongoDB and storage adapters | Complete | `ddd1651 feat: persist recordings with configurable storage` | Added Mongo metadata repository, validated local/S3 storage selection, private local playback and single finalized object handling. |
 | 2 — OPFS sync reliability | Complete | `d8bef04 fix: resume recording sync to configured storage` | Added manifest-backed resumable chunk transport, digest/size checks and server durability confirmation before PWA completion. |
 | 3 — Single administrator | Complete | `b8d80ab feat: add single-admin account setup` | Mongo-backed one-time bootstrap, password login, opaque expiring sessions, manager-route protection, and manager setup/sign-in UI. |
-| 4 — OpenAI transcription | Complete | `ba4a4b1 feat: transcribe stored recordings with OpenAI` | `gpt-transcribe` provider; durable Mongo job state with leases/retry; automatically queue after final audio storage; authenticated transcript/retry API; setup notes in `docs/openai-transcription-setup.md`. |
+| 4 — OpenAI clip transcription | Complete | `ba4a4b1 feat: transcribe stored recordings with OpenAI` | `gpt-transcribe` clip recognition after mandatory pyannote Community-1 diarization on Modal; durable Mongo job state with leases/retry; automatically queue after final audio storage; authenticated transcript/retry API. |
 | 5 — Manager transcript display | Complete | `311ee49 feat: display recording transcripts in manager` | Expandable transcript panel on real PWA capture cards with live status, plain text, provenance, language when returned, and retry for retryable failures; synthetic reports remain distinct. |
 | 6 — Workflow handoff | Complete | `docs: document recording transcription workflow` | Updated local/S3/OpenAI/admin setup and runbooks; workspace builds and in-process worker/authenticated-transcript workflow smokes passed. Live external-service verification remains for configured deployment. |
 
-OpenAI is the selected transcription provider for this increment. The API key is server-only (`OPENAI_API_KEY`). The manager remains a single-admin workspace; there is no tenant model or automated insight extraction in this scope.
+Pyannote Community-1 on Modal is the only diarization provider. OpenAI remains the speech-to-text provider for pyannote's clips; no diarization is requested from OpenAI. The API keys remain server-only. The manager remains a single-admin workspace; there is no tenant model or automated insight extraction in this scope.
 
 ### Phase 4 implementation notes
 
 - The final audio object is read from the selected local or S3 adapter only after upload confirmation. The API submits one merged recording, not the transport chunks.
 - MongoDB `transcription_jobs` stores provider/model, state, attempt count, transcript text, detected languages, timestamps and sanitized error/retry information. A ten-minute processing lease permits restart recovery; startup and a one-minute queue poll resume eligible jobs.
 - Transcript route: `GET /v1/recordings/:recordingId/transcript`; manual retry route: `POST /v1/recordings/:recordingId/transcript/retry`. Both require the single administrator session.
-- The provider returns plain text and language codes only when supplied. No speaker labels, timestamps, or confidence are synthesized. Audio stays in the configured object store; transcripts stay in MongoDB.
-- Files above 25 MiB remain stored but fail transcription with an actionable state; audio splitting/compression remains out of scope until an accurate context-preserving policy is selected.
+- Pyannote Community-1 on Modal supplies speaker turns and overlap intervals; OpenAI transcribes those clips and returns text and language codes when supplied. No speaker labels, word-level timestamps, or confidence are synthesized. Audio stays in the configured object store; transcripts stay in MongoDB.
+- Recordings longer than ten minutes remain stored but fail transcription with an actionable state; longer audio support remains out of scope.
 - Validation completed: workspace typecheck/build, API typecheck/build, fake-provider durable-worker smoke, authenticated transcript-route smoke, and `git diff --check`. No live MongoDB, AWS, or OpenAI credentials are configured in this workspace, so external-service calls remain unverified.
 
 ### Phase 6 verification and remaining deployment step
 
-- Setup docs now describe the implemented one-final-object flow, MongoDB metadata/transcript persistence, OpenAI processing, and one administrator. No audio or credentials were staged.
+- Setup docs describe the one-final-object flow, MongoDB metadata/transcript persistence, required pyannote-on-Modal diarization, OpenAI clip transcription, and one administrator. No audio or credentials were staged.
 - `bun run typecheck`, `bun run build`, focused API/manager builds, fake-provider worker flow, protected transcript API flow, and `git diff --check` passed during implementation.
 - Live service credentials are not configured in this workspace. Start the configured MongoDB, OpenAI and selected local/S3 environment, then use the recording checklist in `docs/s3-upload-setup.md` before treating the external workflow as demonstrated.

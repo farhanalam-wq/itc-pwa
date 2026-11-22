@@ -814,7 +814,7 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
   }
 
   async function reprocessCaptureTranscript(recordingId: string) {
-    if (!window.confirm('Reprocess this recording with speaker labels?')) return;
+    if (!window.confirm('Reprocess this recording to add speaker turns?')) return;
     setCaptureTranscriptRetrying(recordingId);
     setReprocessError(null);
     try {
@@ -883,12 +883,12 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
             </ol> : transcript.transcriptText?.trim()
               ? <p className="capture-transcript-text" dir="auto">{transcript.transcriptText}</p>
               : <p className="capture-transcript-message">No transcript text was returned for this recording.</p>}
-            <small className="capture-transcript-provenance">{transcript.provider} · {transcript.model}
+            <small className="capture-transcript-provenance">{transcript.diarizer ? `${transcript.diarizer.model} · ` : ''}{transcript.provider} · {transcript.model}
               {transcript.turns?.length ? ' · Speaker labels are estimated' : ' · No speaker labels or timings supplied'}
             </small>
             {transcript.canReprocess && <button className="transcript-action capture-reprocess" type="button"
               disabled={captureTranscriptRetrying !== null} onClick={() => void reprocessCaptureTranscript(recordingId)}>
-              {captureTranscriptRetrying === recordingId ? 'Starting…' : 'Reprocess with speakers'}
+              {captureTranscriptRetrying === recordingId ? 'Starting…' : 'Add speaker turns'}
             </button>}
             {reprocessError?.id === recordingId && <p className="capture-transcript-message" role="alert">{reprocessError.message}</p>}
           </>}

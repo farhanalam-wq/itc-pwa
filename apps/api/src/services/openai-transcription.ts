@@ -76,9 +76,9 @@ export interface AudioTranscriptionProvider {
 }
 
 /**
- * Calls OpenAI's file transcription API for finalized, merged audio.
- * The provider returns text and detected languages only; it does not invent
- * speaker labels, segment timings, or confidence values.
+ * Calls OpenAI's file transcription API for text. The live worker supplies
+ * clips produced from pyannote's Modal speaker timeline; this provider does
+ * not request or return diarization, segment timings, or confidence values.
  */
 export class OpenAIAudioTranscriptionProvider implements AudioTranscriptionProvider {
   private readonly client: OpenAI | undefined;

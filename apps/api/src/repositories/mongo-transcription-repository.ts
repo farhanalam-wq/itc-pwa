@@ -179,7 +179,8 @@ export class MongoTranscriptionRepository {
     const claimed = await this.jobs.findOneAndUpdate(
       eligibility,
       {
-        $set: { state: 'processing', processingStartedAt: now, updatedAt: now },
+        // Normalize pre-mandatory-mode jobs when they enter the diarized worker.
+        $set: { state: 'processing', mode: 'diarized', processingStartedAt: now, updatedAt: now },
         $inc: { attempts: 1 }
       },
       { sort: { createdAt: 1 }, returnDocument: 'after' }

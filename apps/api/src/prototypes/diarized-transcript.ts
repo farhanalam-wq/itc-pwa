@@ -1,7 +1,6 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { BYTES_PER_MS, MAX_RECORDING_MS, SAMPLE_RATE, makeClips, readTimeline, wavFromPcm } from '../services/diarization-audio';
 import { ModalDiarizationClient, readModalDiarizationConfig } from './modal-diarization';
@@ -19,7 +18,8 @@ async function main() {
     }
   });
   if (values.help) {
-    console.log('Usage: bun run prototype:diarize <audio> [--modal [--resume-job <id>]] [--transcribe | --synthetic-timeline <json>]');
+    console.log('Usage: bun run prototype:diarize <audio> --modal [--resume-job <id>] [--transcribe]');
+    console.log('       bun run prototype:diarize <audio> --synthetic-timeline <json> [--transcribe]');
     return;
   }
   const [input] = positionals;
@@ -28,6 +28,9 @@ async function main() {
     throw new Error('Synthetic timelines support local clip planning only.');
   }
   if (values['resume-job'] && !values.modal) throw new Error('--resume-job requires --modal.');
+  if (!values.modal && !values['synthetic-timeline']) {
+    throw new Error('Live diarization must use pyannote on Modal. Pass --modal.');
+  }
   const modalClient = values.modal ? new ModalDiarizationClient(readModalDiarizationConfig()) : undefined;
   if (values.transcribe && !readOpenAITranscriptionConfig().configured) {
     throw new Error('Set OPENAI_API_KEY to enable transcription.');
@@ -69,12 +72,7 @@ async function main() {
       modalGpu = result.gpu;
       rawTimeline = result.timeline;
     } else {
-      const python = Bun.env.PYANNOTE_PYTHON || 'python3';
-      const script = fileURLToPath(new URL('../../pyannote/diarize.py', import.meta.url));
-      const diarize = Bun.spawn([python, script, pcmPath], { stdout: 'pipe', stderr: 'inherit' });
-      const [output, code] = await Promise.all([new Response(diarize.stdout).text(), diarize.exited]);
-      if (code !== 0) throw new Error('pyannote failed. Check the Python environment and model access.');
-      rawTimeline = JSON.parse(output);
+      throw new Error('Live diarization must use pyannote on Modal. Pass --modal.');
     }
 
     const timeline = readTimeline(rawTimeline, durationMs);

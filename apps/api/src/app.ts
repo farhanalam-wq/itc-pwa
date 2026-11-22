@@ -22,11 +22,10 @@ import { readStorageConfig } from './services/storage/config';
 import type { TranscriptionJobRepository } from './repositories/mongo-transcription-repository';
 import type { OpenAITranscriptionWorker } from './services/openai-transcription-worker';
 import { OPENAI_TRANSCRIPTION_MODEL, readOpenAITranscriptionConfig } from './services/openai-transcription';
+import { readModalDiarizationConfig } from './services/modal-diarization';
 import {
   S3RecordingUploads
 } from './services/s3-recording-uploads';
-
-const MAX_RECORDING_BYTES = 25_000_000;
 
 async function readBoundedAudioChunk(request: Request): Promise<Uint8Array> {
   const declaredLength = Number(request.headers.get('content-length'));
@@ -152,7 +151,7 @@ const createRecordingBody = t.Object({
   startedAt: t.String({ format: 'date-time' }),
   durationSeconds: t.Number({ minimum: 0, maximum: 60 * 60 * 8 }),
   mimeType: t.String({ minLength: 1, maxLength: 128 }),
-  byteLength: t.Number({ minimum: 1, maximum: MAX_RECORDING_BYTES })
+  byteLength: t.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER })
 });
 
 const recordingParams = t.Object({ recordingId: t.String({ minLength: 1, maxLength: 128 }) });
@@ -290,6 +289,16 @@ export interface ApiRuntimeInfo {
   storageDriver: 'local' | 's3';
 }
 
+function isAudioPipelineConfigured(): boolean {
+  if (!readOpenAITranscriptionConfig().configured || !Bun.which('ffmpeg')) return false;
+  try {
+    readModalDiarizationConfig();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Create the API around a replaceable repository. The default adapter is
  * process-local demo storage: a restart clears visits and recording metadata.
@@ -340,7 +349,8 @@ export function createApp(
       const { diarization: _checkpoint, mode: _mode, ...transcript } = job;
       return {
         ...transcript,
-        canReprocess: job.state === 'completed' && Boolean(transcriptionWorker?.diarizationEnabled)
+        // Legacy whole-file transcripts can be upgraded to pyannote turns.
+        canReprocess: job.state === 'completed' && !job.diarizer
       };
     }
     const createdAt = new Date(recording.startedAt).toISOString();
@@ -362,7 +372,7 @@ export function createApp(
       runtime: {
         persistence: repository instanceof DemoRecordingRepository ? 'in-memory-demo' as const : 'mongodb' as const,
         uploads: 'configured' as const,
-        analysis: readOpenAITranscriptionConfig().configured ? 'configured' as const : 'not-configured' as const,
+        analysis: isAudioPipelineConfigured() ? 'configured' as const : 'not-configured' as const,
         storageDriver: recordingStorage.driver
       } satisfies ApiRuntimeInfo
     }))
@@ -847,7 +857,7 @@ export function createApp(
       if (!isAllowedManagerOrigin(request, managerOrigin)) {
         return status(403, { code: 'admin_origin_rejected', message: 'The administrator request origin is not allowed.' });
       }
-      if (!transcriptionJobs || !transcriptionWorker) return status(503, { code: 'transcription_unavailable', message: 'OpenAI transcription is not configured on the API server.' });
+      if (!transcriptionJobs || !transcriptionWorker) return status(503, { code: 'transcription_unavailable', message: 'Audio transcription is not configured on the API server.' });
       const recording = await repository.getRecording(params.recordingId);
       if (!recording) return status(404, { code: 'recording_not_found', message: 'The requested recording does not exist.' });
       if (recording.syncState !== 'uploaded') return status(409, { code: 'recording_not_stored', message: 'Transcription can be retried after the audio is durably stored.' });
@@ -870,8 +880,8 @@ export function createApp(
       if (!isAllowedManagerOrigin(request, managerOrigin)) {
         return status(403, { code: 'admin_origin_rejected', message: 'The administrator request origin is not allowed.' });
       }
-      if (!transcriptionJobs || !transcriptionWorker?.diarizationEnabled) {
-        return status(503, { code: 'diarization_unavailable', message: 'Speaker diarization is not enabled.' });
+      if (!transcriptionJobs || !transcriptionWorker) {
+        return status(503, { code: 'transcription_unavailable', message: 'Audio transcription is not configured on the API server.' });
       }
       const recording = await repository.getRecording(params.recordingId);
       if (!recording) return status(404, { code: 'recording_not_found', message: 'The requested recording does not exist.' });

@@ -3,7 +3,6 @@ import type { RecordingRepository } from '../repositories/demo-repository';
 import type { TranscriptionJob, TranscriptionJobRepository } from '../repositories/mongo-transcription-repository';
 import {
   AudioTranscriptionError,
-  OPENAI_TRANSCRIPTION_MAX_BYTES,
   OPENAI_TRANSCRIPTION_MODEL,
   type AudioTranscriptionProvider
 } from './openai-transcription';
@@ -27,19 +26,15 @@ export class OpenAITranscriptionWorker {
     private readonly recordings: RecordingRepository,
     private readonly storage: RecordingObjectStorage,
     private readonly provider: AudioTranscriptionProvider,
-    private readonly diarized?: DiarizedTranscriptionPipeline
+    private readonly diarized: DiarizedTranscriptionPipeline
   ) {}
-
-  get diarizationEnabled(): boolean {
-    return this.diarized !== undefined;
-  }
 
   async enqueue(recordingId: string): Promise<TranscriptionJob> {
     const recording = await this.recordings.getRecording(recordingId);
     if (!recording || recording.syncState !== 'uploaded' || !recording.objectKey) {
       throw new Error('Only a durably uploaded recording can be queued for transcription.');
     }
-    const job = await this.jobs.enqueue(recordingId, OPENAI_TRANSCRIPTION_MODEL, this.diarizationEnabled ? 'diarized' : undefined);
+    const job = await this.jobs.enqueue(recordingId, OPENAI_TRANSCRIPTION_MODEL, 'diarized');
     // A deletion may finish while a transcript request is queueing work.
     if (!await this.recordings.getRecording(recordingId)) {
       await this.jobs.delete(recordingId);
@@ -92,43 +87,21 @@ export class OpenAITranscriptionWorker {
       if (recording.analysisState === 'not_started' || recording.analysisState === 'error' || recording.analysisState === 'ready') {
         await this.recordings.transitionAnalysisState(recording.id, 'transcribing');
       }
-      if (recording.byteLength > OPENAI_TRANSCRIPTION_MAX_BYTES) {
-        const failed = await this.jobs.markFailed({
-          recordingId: job.recordingId,
-          attempt: job.attempts,
-          errorCode: 'audio_too_large',
-          errorMessage: 'This recording exceeds OpenAI’s 25 MB transcription file limit.',
-          retryable: false
-        });
-        if (!failed) return { state: 'not_ready' };
-        await this.recordings.transitionAnalysisState(recording.id, 'error');
-        return { state: 'failed', job: failed };
-      }
-
-      if (job.mode === 'diarized' && !this.diarized) {
-        throw new AudioTranscriptionError('provider_not_configured', 'Speaker diarization is not enabled on this server.', true);
-      }
       const bytes = await this.storage.readFinal(recording.objectKey, recording.storageDriver);
       await renew();
-      const diarized = job.mode === 'diarized'
-        ? await this.diarized!.transcribe({
-          job, bytes, mimeType: recording.mimeType, provider: this.provider, signal: controller.signal,
-          checkpoint: (stage, diarization) => renew({stage, diarization})
-        })
-        : undefined;
-      const result = diarized ?? await this.provider.transcribe({
-        recordingId: recording.id,
-        mimeType: recording.mimeType,
-        bytes,
-        signal: controller.signal
+      // All jobs, including legacy jobs without a stored mode, must obtain their
+      // speaker timeline from pyannote through Modal before OpenAI transcribes clips.
+      const result = await this.diarized.transcribe({
+        job, bytes, mimeType: recording.mimeType, provider: this.provider, signal: controller.signal,
+        checkpoint: (stage, diarization) => renew({stage, diarization})
       });
       controller.signal.throwIfAborted();
       const completed = await this.jobs.markCompleted({
         recordingId: recording.id,
         attempt: job.attempts,
         transcriptText: result.text,
-        turns: diarized?.turns,
-        diarizer: diarized?.diarizer,
+        turns: result.turns,
+        diarizer: result.diarizer,
         languageCodes: result.languageCodes,
         model: result.model
       });

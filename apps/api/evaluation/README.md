@@ -4,13 +4,13 @@ From the repository root, generate the fixtures using the server's configured Op
 
 ```bash
 bun run --cwd apps/api evaluation/generate-synthetic-conversations.ts /tmp/itc-evaluation
-bun run --cwd apps/api prototype:diarize /tmp/itc-evaluation/clean-intrasentence.wav --transcribe
-bun run --cwd apps/api prototype:diarize /tmp/itc-evaluation/noise-overlap.wav --transcribe
+bun run --cwd apps/api prototype:diarize /tmp/itc-evaluation/clean-intrasentence.wav --modal --transcribe
+bun run --cwd apps/api prototype:diarize /tmp/itc-evaluation/noise-overlap.wav --modal --transcribe
 ```
 
 The two samples use the same two AI-generated voices and four placements. The noisy sample mixes filtered synthetic noise at 8 dB global SNR and inserts an interruption with 720 ms of clip placement overlap. Reference JSON files describe the prompts and placement ranges. Text-to-speech may deviate from its prompt, and placement ranges include silence, so these are checks for regression and comparison rather than ground truth for diarization error rate or word error rate.
 
-## Local results
+## Historical comparison results
 
 | Synthetic sample | Speakers and order | GPT clip requests | GPT whole file | GPT clips, sequential |
 | --- | --- | ---: | ---: | ---: |
