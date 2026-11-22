@@ -1,5 +1,14 @@
 import type { ApiError, HealthResponse } from '@itc/contracts';
-import type { AnalysisState, ManualTranscriptAnalysis, RecordingMetadata, RecordingTranscript, SyncState } from '@itc/domain';
+import type {
+  AnalysisState,
+  ConversationAnalysisReport,
+  DenoisedAnalysisAudioInput,
+  ManualTranscriptAnalysis,
+  RecordingConversationAnalysis,
+  RecordingMetadata,
+  RecordingTranscript,
+  SyncState
+} from '@itc/domain';
 export type { ManualTranscriptAnalysis } from '@itc/domain';
 export type { RecordingTranscript } from '@itc/domain';
 
@@ -74,7 +83,14 @@ export interface CreateVisitRequest {
 export type CreateRecordingRequest = Pick<
   RecordingMetadata,
   'id' | 'startedAt' | 'durationSeconds' | 'mimeType' | 'byteLength'
->;
+> & { denoisedAnalysisAudio?: DenoisedAnalysisAudioInput };
+
+export interface ConversationAnalysisReportQuery {
+  from?: string;
+  to?: string;
+  territoryId?: string;
+  representativeId?: string;
+}
 
 export interface ListRecordingsQuery {
   syncState?: SyncState;
@@ -138,6 +154,11 @@ export interface ApiClient {
   listRecordings(query?: ListRecordingsQuery): Promise<RecordingPage>;
   getRecordingDownloadUrl(recordingId: string): Promise<SignedRecordingUrl>;
   uploadRecordingAudio(recordingId: string, file: Blob, onChunk?: (sent: number, total: number) => void): Promise<RecordingMetadata>;
+  uploadRecordingAnalysisAudio(recordingId: string, file: Blob, onChunk?: (sent: number, total: number) => void): Promise<RecordingMetadata>;
+  getRecordingConversationAnalysis(recordingId: string): Promise<RecordingConversationAnalysis>;
+  retryRecordingConversationAnalysis(recordingId: string): Promise<RecordingConversationAnalysis>;
+  reprocessRecordingConversationAnalysis(recordingId: string): Promise<RecordingConversationAnalysis>;
+  getConversationAnalysisReport(query?: ConversationAnalysisReportQuery): Promise<ConversationAnalysisReport>;
   ingestTranscript(input: CreateManualTranscriptRequest): Promise<ManualTranscriptAnalysis>;
   listTranscripts(): Promise<ManualTranscriptPage>;
   getTranscript(transcriptId: string): Promise<ManualTranscriptAnalysis>;
@@ -295,6 +316,37 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
         onChunk?.(index + 1, total);
       }
       return request<RecordingMetadata>(`/v1/recordings/${encodeURIComponent(recordingId)}/audio/complete`, { method: 'POST' });
+    },
+    uploadRecordingAnalysisAudio: async (recordingId, file, onChunk) => {
+      const chunkSize = 1024 * 1024;
+      const total = Math.max(1, Math.ceil(file.size / chunkSize));
+      for (let index = 0; index < total; index += 1) {
+        const chunk = file.slice(index * chunkSize, Math.min(file.size, (index + 1) * chunkSize));
+        await request<{ received: boolean }>(`/v1/recordings/${encodeURIComponent(recordingId)}/analysis-audio/${index}/${total}`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/octet-stream' }, body: chunk
+        });
+        onChunk?.(index + 1, total);
+      }
+      return request<RecordingMetadata>(`/v1/recordings/${encodeURIComponent(recordingId)}/analysis-audio/complete`, { method: 'POST' });
+    },
+    getRecordingConversationAnalysis: (recordingId) => request<RecordingConversationAnalysis>(
+      '/v1/recordings/' + encodeURIComponent(recordingId) + '/conversation-analysis'
+    ),
+    retryRecordingConversationAnalysis: (recordingId) => request<RecordingConversationAnalysis>(
+      '/v1/recordings/' + encodeURIComponent(recordingId) + '/conversation-analysis/retry',
+      { method: 'POST' }
+    ),
+    reprocessRecordingConversationAnalysis: (recordingId) => request<RecordingConversationAnalysis>(
+      '/v1/recordings/' + encodeURIComponent(recordingId) + '/conversation-analysis/reprocess',
+      { method: 'POST' }
+    ),
+    getConversationAnalysisReport: (query = {}) => {
+      const search = new URLSearchParams();
+      for (const [key, value] of Object.entries(query)) {
+        if (value !== undefined) search.set(key, String(value));
+      }
+      const queryString = search.toString();
+      return request<ConversationAnalysisReport>('/v1/reports/conversation-analysis' + (queryString ? '?' + queryString : ''));
     },
     ingestTranscript: (input) => request<ManualTranscriptAnalysis>('/v1/transcripts', {
       method: 'POST',
