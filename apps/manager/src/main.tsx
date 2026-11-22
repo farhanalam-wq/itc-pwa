@@ -10,8 +10,14 @@ import {
   type DemoSignalAggregate
 } from '@itc/demo-data';
 import { ReportChart } from '@itc/charts';
-import type { AnalysisState, ManualTranscriptAnalysis, RecordingMetadata, RecordingTranscript, SyncState } from '@itc/domain';
+import type { AnalysisState, ConversationAnalysisState, ManualTranscriptAnalysis, RecordingMetadata, RecordingTranscript, SyncState } from '@itc/domain';
 import { OverviewPanel } from './overview-panel';
+import {
+  ConversationAnalysisPanel,
+  ConversationAnalysisReportPanel,
+  type ConversationAnalysisLoadState,
+  type ConversationAnalysisReportState
+} from './conversation-analysis';
 import { TranscriptImportForm, type TranscriptImportInput } from './transcript-import-form';
 import '@fontsource-variable/hanken-grotesk';
 import './styles.css';
@@ -40,6 +46,14 @@ const analysisStateDetails: Record<AnalysisState, { label: string; detail: strin
   analyzing: { label: 'Processing', detail: 'The stored audio is being processed.' },
   ready: { label: 'Transcript ready', detail: 'Transcript text is available from the uploaded recording.' },
   error: { label: 'Transcription failed', detail: 'The audio is stored; transcription needs attention.' }
+};
+
+const conversationAnalysisLabels: Record<ConversationAnalysisState, string> = {
+  not_started: 'Sales analysis not started',
+  queued: 'Sales analysis queued',
+  processing: 'Sales analysis processing',
+  completed: 'Sales analysis ready',
+  failed: 'Sales analysis failed'
 };
 
 const palette = {
@@ -360,6 +374,12 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
   const deletedCaptureIds = useRef(new Set<string>());
   const [capturePlaybackError, setCapturePlaybackError] = useState<string | null>(null);
   const [captureTranscriptStates, setCaptureTranscriptStates] = useState<Record<string, CaptureTranscriptState>>({});
+  const [captureConversationAnalysisStates, setCaptureConversationAnalysisStates] = useState<Record<string, ConversationAnalysisLoadState>>({});
+  const [captureConversationAnalysisAction, setCaptureConversationAnalysisAction] = useState<string | null>(null);
+  const [conversationAnalysisReport, setConversationAnalysisReport] = useState<ConversationAnalysisReportState>({ kind: 'loading' });
+  const conversationAnalysisRequests = useRef(new Set<string>());
+  const conversationAnalysisReportRequestId = useRef(0);
+  const [overviewSourceMode, setOverviewSourceMode] = useState<'real' | 'demo' | 'both'>('both');
   const [selectedCaptureTranscriptId, setSelectedCaptureTranscriptId] = useState<string | null>(null);
   const [captureTranscriptRetrying, setCaptureTranscriptRetrying] = useState<string | null>(null);
   const [manualTranscripts, setManualTranscripts] = useState<ManualTranscriptAnalysis[]>([]);
@@ -426,6 +446,21 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
     }
   }, []);
 
+  const loadCaptureConversationAnalysis = useCallback(async (recordingId: string) => {
+    if (conversationAnalysisRequests.current.has(recordingId)) return;
+    conversationAnalysisRequests.current.add(recordingId);
+    setCaptureConversationAnalysisStates((current) => ({ ...current, [recordingId]: { kind: 'loading' } }));
+    try {
+      const analysis = await captureApi.getRecordingConversationAnalysis(recordingId);
+      setCaptureConversationAnalysisStates((current) => ({ ...current, [recordingId]: { kind: 'loaded', analysis } }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'The conversation analysis could not be loaded.';
+      setCaptureConversationAnalysisStates((current) => ({ ...current, [recordingId]: { kind: 'error', message } }));
+    } finally {
+      conversationAnalysisRequests.current.delete(recordingId);
+    }
+  }, []);
+
   useEffect(() => {
     if (!selectedCaptureTranscriptId) return;
     const current = captureTranscriptStates[selectedCaptureTranscriptId];
@@ -433,6 +468,14 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
     const timer = window.setInterval(() => void loadCaptureTranscript(selectedCaptureTranscriptId), 3_500);
     return () => window.clearInterval(timer);
   }, [captureTranscriptStates, loadCaptureTranscript, selectedCaptureTranscriptId]);
+
+  useEffect(() => {
+    if (!selectedCaptureTranscriptId) return;
+    const current = captureConversationAnalysisStates[selectedCaptureTranscriptId];
+    if (current?.kind !== 'loaded' || !['queued', 'processing'].includes(current.analysis.state)) return;
+    const timer = window.setInterval(() => void loadCaptureConversationAnalysis(selectedCaptureTranscriptId), 3_500);
+    return () => window.clearInterval(timer);
+  }, [captureConversationAnalysisStates, loadCaptureConversationAnalysis, selectedCaptureTranscriptId]);
 
   const territories = useMemo(() => [...new Set([
     ...demoConversations.map((item) => item.territoryName ?? item.territoryId),
@@ -445,6 +488,52 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
     ...fieldCaptures.flatMap((item) => item.representativeId ? [item.representativeId] : [])
   ])].sort(), [fieldCaptures, manualTranscripts]);
   const reportAsOfDate = [new Date().toISOString().slice(0, 10), demoAsOfDate].sort().at(-1)!;
+  const reportToday = new Date().toISOString().slice(0, 10);
+  const conversationAnalysisReportQuery = useMemo(() => {
+    const selectedTerritoryIsId = territory !== 'all' && fieldCaptures.some((item) => item.territoryId === territory);
+    const selectedRepresentativeIsId = representative !== 'all' && fieldCaptures.some((item) => item.representativeId === representative);
+    return {
+      ...(period !== 'all' ? { from: shiftDateKey(reportToday, 1 - Number(period)) } : {}),
+      to: reportToday,
+      ...(selectedTerritoryIsId ? { territoryId: territory } : {}),
+      ...(selectedRepresentativeIsId ? { representativeId: representative } : {})
+    };
+  }, [fieldCaptures, period, reportToday, representative, territory]);
+  const refreshConversationAnalysisReport = useCallback(async () => {
+    const requestId = conversationAnalysisReportRequestId.current + 1;
+    conversationAnalysisReportRequestId.current = requestId;
+    setConversationAnalysisReport({ kind: 'loading' });
+    try {
+      const report = await captureApi.getConversationAnalysisReport(conversationAnalysisReportQuery);
+      if (conversationAnalysisReportRequestId.current === requestId) setConversationAnalysisReport({ kind: 'loaded', report });
+    } catch (error) {
+      if (conversationAnalysisReportRequestId.current === requestId) setConversationAnalysisReport({ kind: 'error', message: error instanceof Error ? error.message : 'The real recording analysis report could not be loaded.' });
+    }
+  }, [conversationAnalysisReportQuery]);
+
+  useEffect(() => {
+    void refreshConversationAnalysisReport();
+  }, [refreshConversationAnalysisReport]);
+
+  const runCaptureConversationAnalysisAction = useCallback(async (recordingId: string, action: 'retry' | 'reprocess') => {
+    if (action === 'reprocess' && !window.confirm('Reprocess the sales analysis for this recording?')) return;
+    setCaptureConversationAnalysisAction(recordingId);
+    setCaptureConversationAnalysisStates((current) => ({ ...current, [recordingId]: { kind: 'loading' } }));
+    try {
+      const analysis = action === 'retry'
+        ? await captureApi.retryRecordingConversationAnalysis(recordingId)
+        : await captureApi.reprocessRecordingConversationAnalysis(recordingId);
+      setCaptureConversationAnalysisStates((current) => ({ ...current, [recordingId]: { kind: 'loaded', analysis } }));
+      void refreshFieldCaptures();
+      void refreshConversationAnalysisReport();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : `Conversation analysis could not be ${action === 'retry' ? 'retried' : 'reprocessed'}.`;
+      setCaptureConversationAnalysisStates((current) => ({ ...current, [recordingId]: { kind: 'error', message } }));
+    } finally {
+      setCaptureConversationAnalysisAction(null);
+    }
+  }, [refreshConversationAnalysisReport, refreshFieldCaptures]);
+
   const filteredFieldCaptures = useMemo(() => {
     const cutoff = period === 'all' ? 0 : Date.now() - Number(period) * 86_400_000;
     const query = search.trim().toLowerCase();
@@ -797,6 +886,8 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
     setSelectedCaptureTranscriptId(recordingId);
     const transcriptState = captureTranscriptStates[recordingId];
     if (transcriptState?.kind !== 'loaded') void loadCaptureTranscript(recordingId);
+    const analysisState = captureConversationAnalysisStates[recordingId];
+    if (analysisState?.kind !== 'loaded') void loadCaptureConversationAnalysis(recordingId);
   }
 
   async function retryCaptureTranscript(recordingId: string) {
@@ -835,8 +926,12 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
 
   function renderCaptureTranscript(recordingId: string) {
     if (selectedCaptureTranscriptId !== recordingId) return null;
+    const recording = fieldCaptures.find((item) => item.id === recordingId);
+    if (!recording) return null;
     const transcriptState = captureTranscriptStates[recordingId];
-    return <section className="capture-transcript-panel" aria-label="Recording transcript" aria-live="polite">
+    const analysisState = captureConversationAnalysisStates[recordingId] ?? { kind: 'idle' as const };
+    return <div className="capture-recording-review">
+    <section className="capture-transcript-panel" aria-label="Recording transcript" aria-live="polite">
       <div className="capture-transcript-heading"><h3>Transcript from this recording</h3><span>Real PWA audio · separate from synthetic reports</span></div>
       {!transcriptState && <p className="capture-transcript-loading" role="status">Requesting transcript status…</p>}
       {transcriptState?.kind === 'loading' && <div className="capture-transcript-loading" role="status"><i aria-hidden="true"/>Loading transcript status…</div>}
@@ -895,7 +990,18 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
           {transcriptState.refreshError && <p className="capture-transcript-refresh-error" role="status">Could not refresh transcription status: {transcriptState.refreshError}</p>}
         </>;
       })()}
-    </section>;
+    </section>
+    <ConversationAnalysisPanel
+      recording={recording}
+      state={analysisState}
+      transcript={transcriptState?.kind === 'loaded' ? transcriptState.transcript : undefined}
+      retrying={captureConversationAnalysisAction === recordingId}
+      onRetryLoad={() => void loadCaptureConversationAnalysis(recordingId)}
+      onRetryAnalysis={() => void runCaptureConversationAnalysisAction(recordingId, 'retry')}
+      onReprocessAnalysis={() => void runCaptureConversationAnalysisAction(recordingId, 'reprocess')}
+      onSeek={(startMs) => { void seekCaptureAudio(recordingId, startMs); }}
+    />
+    </div>;
   }
 
   async function ingestManualTranscript(input: TranscriptImportInput) {
@@ -937,7 +1043,7 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
         <div className="live-capture-identity"><strong>{recording.outletName || 'Field recording'}</strong><span>{[recording.representativeId, recording.territoryId].filter(Boolean).join(' · ')}</span></div>
         <div className="live-capture-meta"><time dateTime={recording.startedAt}>{formatDateTime(recording.startedAt)}</time><span>{formatDuration(Math.round(recording.durationSeconds))}</span><span>{syncLabels[recording.syncState]}</span></div>
         {recording.syncState === 'uploaded'
-          ? <div className="live-capture-actions"><span className={`capture-compact-status analysis-${recording.analysisState}`}>{analysisStateDetails[recording.analysisState].label}</span><button className="live-audio-button" type="button" onClick={() => void toggleCaptureAudio(recording.id)} disabled={captureAudioLoading === recording.id}>{captureAudioLoading === recording.id ? 'Loading…' : activeCaptureAudio?.id === recording.id ? 'Close audio' : 'Listen to audio'}</button><button className="live-transcript-button" type="button" aria-expanded={selectedCaptureTranscriptId === recording.id} aria-controls={`recording-transcript-${recording.id}`} onClick={() => toggleCaptureTranscript(recording.id)}>{selectedCaptureTranscriptId === recording.id ? 'Hide transcript' : hasCompletedCaptureTranscript(recording.id) ? 'View transcript' : 'Transcript status'}</button></div>
+          ? <div className="live-capture-actions"><span className={`capture-compact-status analysis-${recording.analysisState}`}>{analysisStateDetails[recording.analysisState].label}</span>{recording.conversationAnalysisState && <span className={`capture-compact-status conversation-state-${recording.conversationAnalysisState}`}>{conversationAnalysisLabels[recording.conversationAnalysisState]}</span>}<button className="live-audio-button" type="button" onClick={() => void toggleCaptureAudio(recording.id)} disabled={captureAudioLoading === recording.id}>{captureAudioLoading === recording.id ? 'Loading…' : activeCaptureAudio?.id === recording.id ? 'Close audio' : 'Listen to audio'}</button><button className="live-transcript-button" type="button" aria-expanded={selectedCaptureTranscriptId === recording.id} aria-controls={`recording-transcript-${recording.id}`} onClick={() => toggleCaptureTranscript(recording.id)}>{selectedCaptureTranscriptId === recording.id ? 'Hide transcript' : hasCompletedCaptureTranscript(recording.id) ? 'View transcript' : 'Transcript status'}</button></div>
           : <span className={`live-upload-state sync-${recording.syncState}`}>{recording.syncState === 'queued' ? 'Waiting for upload' : recording.syncState === 'uploading' ? 'Uploading' : 'Upload needs attention'}</span>}
         {activeCaptureAudio?.id === recording.id && <audio ref={capturePlayer} className="live-capture-player" controls preload="metadata" onLoadedMetadata={(event) => applyCaptureSeek(recording.id, event.currentTarget)} src={activeCaptureAudio.url} aria-label={`Audio for ${recording.outletName || 'field recording'}, ${formatDateTime(recording.startedAt)}`}/>}
         <div id={`recording-transcript-${recording.id}`} className="live-transcript-slot" hidden={selectedCaptureTranscriptId !== recording.id}>{renderCaptureTranscript(recording.id)}</div>
@@ -968,6 +1074,10 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
       captures={filteredFieldCaptures}
       totalCaptureCount={fieldCaptureTotal}
       captureState={captureApiState}
+      sourceMode={overviewSourceMode}
+      onSourceModeChange={setOverviewSourceMode}
+      realAnalysisState={conversationAnalysisReport}
+      onRetryRealAnalysis={() => void refreshConversationAnalysisReport()}
       periodLabel={period === '7' ? 'Last 7 days' : period === '30' ? 'Last 30 days' : 'all dates'}
       onOpenInsights={() => setView('insights')}
       onOpenVisits={() => setView('visits')}
@@ -986,10 +1096,11 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
   }
 
   function renderInsights() {
-    if (!conversations.length) return <>{renderTranscriptImport()}{renderLiveCapturePreview()}<div className="empty-state"><Icon name="search"/><h2>No analyzed conversations match these filters</h2><p>Import a consented transcript below or change the date range and filters to review the seeded demo reports.</p><button className="button" onClick={() => { setPeriod('all'); setTerritory('all'); setRepresentative('all'); setSearch(''); }}>Show all reports</button></div></>;
+    if (!conversations.length) return <>{renderTranscriptImport()}{renderLiveCapturePreview()}<ConversationAnalysisReportPanel state={conversationAnalysisReport} periodLabel={period === '7' ? 'last 7 days' : period === '30' ? 'last 30 days' : 'all dates'} onRetry={() => void refreshConversationAnalysisReport()}/><div className="empty-state"><Icon name="search"/><h2>No analyzed demo or imported conversations match these filters</h2><p>Real recording analysis is shown separately above. Import a consented transcript or change the date range and filters to review the original parsed/demo reports.</p><button className="button" onClick={() => { setPeriod('all'); setTerritory('all'); setRepresentative('all'); setSearch(''); }}>Show all reports</button></div></>;
     return <>
       {renderTranscriptImport()}
       {renderLiveCapturePreview()}
+      <ConversationAnalysisReportPanel state={conversationAnalysisReport} periodLabel={period === '7' ? 'last 7 days' : period === '30' ? 'last 30 days' : 'all dates'} onRetry={() => void refreshConversationAnalysisReport()}/>
       <div className="pulse-strip" aria-label="Field pulse">
         <div className="pulse-item"><span>Analyzed visits</span><strong>{formatCount(analyzedCount)}</strong><small>in selected period</small></div>
           <div className="pulse-item"><span>Unique outlets</span><strong>{formatCount(outletCount)}</strong><small>distinct shopkeepers</small></div>
@@ -1115,6 +1226,12 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
         delete next[recording.id];
         return next;
       });
+      setCaptureConversationAnalysisStates((current) => {
+        const next = { ...current };
+        delete next[recording.id];
+        return next;
+      });
+      void refreshConversationAnalysisReport();
       setCaptureDeleteNotice({ error: false, text: 'Recording deleted.' });
     } catch (error) {
       setCaptureDeleteNotice({ error: true, text: error instanceof Error ? error.message : 'Could not delete the recording.' });
@@ -1183,7 +1300,7 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
                   <td className="capture-wide-column"><time dateTime={recording.startedAt}>{recorded}</time></td>
                   <td className="capture-wide-column">{formatDuration(Math.round(recording.durationSeconds))}</td>
                   <td className="capture-wide-column">{syncLabels[recording.syncState]}</td>
-                  <td><span className={`capture-compact-status analysis-${recording.analysisState}`}>{analysisStateDetails[recording.analysisState].label}</span></td>
+                  <td><span className={`capture-compact-status analysis-${recording.analysisState}`}>{analysisStateDetails[recording.analysisState].label}</span>{recording.conversationAnalysisState && <small className={`capture-analysis-substate conversation-state-${recording.conversationAnalysisState}`}>{conversationAnalysisLabels[recording.conversationAnalysisState]}</small>}</td>
                   <td>
                     <div className="capture-table-actions">
                       <button className="icon-button" type="button" title={audioAction}

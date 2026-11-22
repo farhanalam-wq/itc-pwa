@@ -1,5 +1,6 @@
 import type { DemoConversation } from '@itc/demo-data';
 import type { RecordingMetadata, SyncState } from '@itc/domain';
+import { ConversationAnalysisReportPanel, type ConversationAnalysisReportState } from './conversation-analysis';
 import './overview-panel.css';
 
 export interface OverviewPanelProps {
@@ -7,6 +8,10 @@ export interface OverviewPanelProps {
   captures: RecordingMetadata[];
   totalCaptureCount: number;
   captureState: 'loading' | 'available' | 'unavailable';
+  sourceMode: 'real' | 'demo' | 'both';
+  onSourceModeChange: (mode: 'real' | 'demo' | 'both') => void;
+  realAnalysisState: ConversationAnalysisReportState;
+  onRetryRealAnalysis: () => void;
   periodLabel: string;
   onOpenInsights: () => void;
   onOpenVisits: () => void;
@@ -18,6 +23,14 @@ const syncLabels: Record<SyncState, string> = {
   uploaded: 'Synced',
   error: 'Upload needs attention'
 };
+
+const conversationAnalysisLabels = {
+  not_started: 'Sales analysis not started',
+  queued: 'Sales analysis queued',
+  processing: 'Sales analysis processing',
+  completed: 'Sales analysis ready',
+  failed: 'Sales analysis failed'
+} as const;
 
 function formatCount(value: number): string {
   return new Intl.NumberFormat('en-IN').format(value);
@@ -64,6 +77,10 @@ export function OverviewPanel({
   captures,
   totalCaptureCount,
   captureState,
+  sourceMode,
+  onSourceModeChange,
+  realAnalysisState,
+  onRetryRealAnalysis,
   periodLabel,
   onOpenInsights,
   onOpenVisits
@@ -99,18 +116,24 @@ export function OverviewPanel({
     <header className="overview-intro">
       <div>
         <h2 id="overview-panel-title">Team coverage and operating actions</h2>
-        <p>Route coverage, declared outcomes, and capture sync for {periodLabel.toLowerCase()}.</p>
+        <p>Switch between real field recordings and the original parsed/demo reports for {periodLabel.toLowerCase()}.</p>
       </div>
-      <div className="overview-source-legend" aria-label="Conversation data sources">
+      <div className="overview-source-toggle" role="group" aria-label="Overview data source">
+        {(['real', 'demo', 'both'] as const).map((mode) => <button key={mode} type="button" aria-pressed={sourceMode === mode} onClick={() => onSourceModeChange(mode)}>
+        {mode === 'real' ? 'Real' : mode === 'demo' ? 'Demo' : 'Both'}
+        </button>)}
+      </div>
+      {sourceMode !== 'real' && <div className="overview-source-legend" aria-label="Demo report sources">
         {sourceCounts.synthetic > 0 && <span><i className="overview-source-dot synthetic"/>Demo fixtures {formatCount(sourceCounts.synthetic)}</span>}
         {sourceCounts.manual > 0 && <span><i className="overview-source-dot manual"/>Manual transcript reports {formatCount(sourceCounts.manual)}</span>}
         {sourceCounts.other > 0 && <span><i className="overview-source-dot imported"/>Other imported reports {formatCount(sourceCounts.other)}</span>}
-      </div>
+      </div>}
     </header>
 
-    <section className="overview-coverage" aria-label="Conversation coverage">
+    {sourceMode !== 'real' && <div className="overview-source-panel" aria-label="Demo and parsed transcript reports">
+    <section className="overview-coverage" aria-label="Demo and parsed report coverage">
       <div className="overview-coverage-head">
-        <div><h3>Coverage</h3><p>Conversation records in the selected report range</p></div>
+        <div><h3>Demo and parsed report coverage</h3><p>{formatCount(conversations.length)} reports · real recordings are counted separately</p></div>
         <button className="overview-link" type="button" onClick={onOpenInsights}>Open conversation insights</button>
       </div>
       <dl className="overview-coverage-grid">
@@ -146,8 +169,13 @@ export function OverviewPanel({
         </ul> : <p className="overview-empty">No explicit follow-up commitments are recorded in this range.</p>}
       </section>
     </div>
+    </div>}
 
-    <section className="overview-captures" aria-labelledby="overview-captures-title">
+    {sourceMode !== 'demo' && <div className="overview-source-panel" aria-label="Real field recording analysis">
+      <ConversationAnalysisReportPanel state={realAnalysisState} periodLabel={periodLabel} onRetry={onRetryRealAnalysis}/>
+    </div>}
+
+    {sourceMode !== 'demo' && <section className="overview-captures" aria-labelledby="overview-captures-title">
       <div className="overview-capture-heading">
         <div><h3 id="overview-captures-title">Live device captures</h3><p>PWA sync status, separate from analyzed conversation reports</p></div>
         <button className="overview-link" type="button" onClick={onOpenVisits}>Open capture history</button>
@@ -157,7 +185,8 @@ export function OverviewPanel({
           <div><strong>{capture.outletName || 'Field recording'}</strong><span>{[capture.representativeId, capture.territoryId].filter(Boolean).join(' · ')}</span></div>
           <time dateTime={capture.startedAt}>{formatDateTime(capture.startedAt)}</time>
           <span className={`overview-sync-state sync-${capture.syncState}`}>{syncLabels[capture.syncState]}</span>
-          <span className={`overview-analysis-state analysis-${capture.analysisState}`}>{capture.analysisState === 'not_started' ? 'Analysis not started' : capture.analysisState === 'ready' ? 'Analysis ready' : capture.analysisState === 'error' ? 'Analysis failed' : capture.analysisState === 'transcribing' ? 'Transcribing' : 'Analyzing'}</span>
+          <span className={`overview-analysis-state analysis-${capture.analysisState}`}>{capture.analysisState === 'not_started' ? 'Transcript not started' : capture.analysisState === 'ready' ? 'Transcript ready' : capture.analysisState === 'error' ? 'Transcription failed' : capture.analysisState === 'transcribing' ? 'Transcribing' : 'Analyzing audio'}</span>
+          {capture.conversationAnalysisState && <span className={`overview-analysis-state conversation-state-${capture.conversationAnalysisState}`}>{conversationAnalysisLabels[capture.conversationAnalysisState]}</span>}
         </article>)}
       </div> : captureState === 'unavailable'
         ? <p className="overview-empty" role="status">The capture API is unavailable. Start or refresh the API to check device sync status.</p>
@@ -166,6 +195,6 @@ export function OverviewPanel({
           : totalCaptureCount > 0
             ? <p className="overview-empty">No captures match the selected date, territory, representative, or search.</p>
             : <p className="overview-empty">No live PWA capture metadata has arrived. Record a visit in the Field PWA and bring the device online to sync it here.</p>}
-    </section>
+    </section>}
   </section>;
 }
