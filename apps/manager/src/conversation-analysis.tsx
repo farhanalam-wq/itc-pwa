@@ -343,7 +343,7 @@ export function ConversationAnalysisReportPanel({
             </table></div> : <p className="production-analysis-empty">No supported sales signals were extracted for this scope.</p>}
           </section>
           <div className="production-analysis-quality">
-            <strong>Evidence coverage</strong>
+            <strong>Evidence coverage · outcomes, orders and sales signals</strong>
             <span>{formatCount(report.evidenceCoverage.evidenceLinkedFindingCount)} of {formatCount(report.evidenceCoverage.findingCount)} findings link to transcript evidence</span>
             <small>Confidence: {formatCount(report.evidenceCoverage.highConfidenceFindingCount)} high · {formatCount(report.evidenceCoverage.mediumConfidenceFindingCount)} medium · {formatCount(report.evidenceCoverage.lowConfidenceFindingCount)} low · {formatCount(report.evidenceCoverage.uncertainFindingCount)} uncertain</small>
           </div>

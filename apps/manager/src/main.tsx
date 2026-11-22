@@ -490,15 +490,13 @@ function ManagerDashboard({ admin, onLogout, logoutBusy, logoutError }: { admin:
   const reportAsOfDate = [new Date().toISOString().slice(0, 10), demoAsOfDate].sort().at(-1)!;
   const reportToday = new Date().toISOString().slice(0, 10);
   const conversationAnalysisReportQuery = useMemo(() => {
-    const selectedTerritoryIsId = territory !== 'all' && fieldCaptures.some((item) => item.territoryId === territory);
-    const selectedRepresentativeIsId = representative !== 'all' && fieldCaptures.some((item) => item.representativeId === representative);
     return {
       ...(period !== 'all' ? { from: shiftDateKey(reportToday, 1 - Number(period)) } : {}),
       to: reportToday,
-      ...(selectedTerritoryIsId ? { territoryId: territory } : {}),
-      ...(selectedRepresentativeIsId ? { representativeId: representative } : {})
+      ...(territory !== 'all' ? { territoryId: territory } : {}),
+      ...(representative !== 'all' ? { representativeId: representative } : {})
     };
-  }, [fieldCaptures, period, reportToday, representative, territory]);
+  }, [period, reportToday, representative, territory]);
   const refreshConversationAnalysisReport = useCallback(async () => {
     const requestId = conversationAnalysisReportRequestId.current + 1;
     conversationAnalysisReportRequestId.current = requestId;
