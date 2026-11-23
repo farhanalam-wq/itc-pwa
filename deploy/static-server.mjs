@@ -16,9 +16,11 @@ const contentTypes = new Map([
 Bun.serve({
   hostname: '0.0.0.0',
   port,
-  async fetch(request) {
+  async fetch(request, server) {
     const url = new URL(request.url);
     if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
+      // Finalizing an upload can wait on object storage without producing a response byte.
+      server.timeout(request, 255);
       const apiPath = url.pathname.replace(/^\/api(?=\/|$)/, '') || '/';
       const upstream = new URL(`${apiPath}${url.search}`, apiOrigin);
       return fetch(new Request(upstream, request));
