@@ -868,6 +868,10 @@ function FieldApp() {
       <a className="brand-lockup" href="#capture" onClick={(event) => { event.preventDefault(); setScreen('capture'); }} aria-label="Field Source capture">
         <span className="brand-mark">FS</span><span>Field Source</span>
       </a>
+      <nav className="bottom-nav" aria-label="Primary navigation">
+        <button type="button" className={screen === 'capture' ? 'active' : ''} aria-current={screen === 'capture' ? 'page' : undefined} onClick={() => setScreen('capture')}><Icon name="record"/>Record</button>
+        <button type="button" className={screen === 'history' ? 'active' : ''} aria-current={screen === 'history' ? 'page' : undefined} onClick={() => setScreen('history')}><Icon name="history"/>History</button>
+      </nav>
       <span className={`connection ${online ? 'connected' : 'disconnected'}`}><i/>{connectionLabel}</span>
     </header>
 
@@ -875,7 +879,7 @@ function FieldApp() {
       {notice && <div className={`notice notice-${notice.kind}`} role={notice.kind === 'error' ? 'alert' : 'status'} aria-live={notice.kind === 'error' ? 'assertive' : 'polite'}>{notice.text}<button type="button" aria-label="Dismiss message" onClick={() => setNotice(null)}><Icon name="close"/></button></div>}
       {storageError && <div className="notice notice-error" role="alert">{storageError}</div>}
       {storage?.quota && storage.quota - (storage.usage ?? 0) < 50_000_000 && <div className="storage-warning" role="status">Local storage is getting low. Free space before recording another long visit.</div>}
-      {screen === 'capture' ? <>
+      {screen === 'capture' ? <div className="capture-layout">
         <h1 className="capture-title">Record a conversation</h1>
         <section className="capture-options" aria-label="Recording setup">
           {!support.supported && <p role="alert">{support.reason}</p>}
@@ -920,7 +924,7 @@ function FieldApp() {
         </section>
 
         <StorageBreakdown snapshot={storage} onProtect={() => { void handleEnablePersistence(); }}/>
-      </> : <section className="history-screen">
+      </div> : <section className="history-screen">
         <div className="history-title"><div><h1>Recording history</h1><p>Audio saved on this phone.</p></div><span className="history-total">{displayRecords.length}</span></div>
         <StorageBreakdown snapshot={storage}/>
         {displayRecords.length ? <div className="full-history">{displayRecords.map((recording) => <RecordingRow key={recording.id} recording={recording} playingId={playingId} audioUrl={audioUrl} onPlay={(item) => { void handlePlay(item); }} storageAvailable={storageAvailable} storageDriver={storageDriver} onRetry={(item) => { void handleRetryUpload(item); }}/>)}</div>
@@ -940,10 +944,6 @@ function FieldApp() {
         <span className="chunk-queue-count">{item.state === 'complete' ? 'Saved' : item.state === 'error' ? 'Retry' : `${item.completedChunks}/${item.totalChunks}`}</span>
       </div>)}
     </section>}
-    <nav className="bottom-nav" aria-label="Primary navigation">
-      <button type="button" className={screen === 'capture' ? 'active' : ''} aria-current={screen === 'capture' ? 'page' : undefined} onClick={() => setScreen('capture')}><Icon name="record"/>Record</button>
-      <button type="button" className={screen === 'history' ? 'active' : ''} aria-current={screen === 'history' ? 'page' : undefined} onClick={() => setScreen('history')}><Icon name="history"/>History</button>
-    </nav>
     {screen === 'history' && <footer className="truth-footer"><span>{uploadLabel}</span><span>{apiHealth?.runtime.analysis === 'not-configured' ? 'Transcription unavailable' : 'Analysis follows upload'}</span></footer>}
   </div>;
 }

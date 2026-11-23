@@ -334,7 +334,7 @@ function AccountAccessPage({
         <label htmlFor="admin-email">Email</label>
         <input id="admin-email" name="email" type="email" autoComplete="username" value={email} onChange={(event) => setEmail(event.target.value)} required maxLength={254}/>
         <label htmlFor="admin-password">Password</label>
-        <input id="admin-password" name="password" type="password" autoComplete={mode === 'setup' ? 'new-password' : 'current-password'} value={password} onChange={(event) => setPassword(event.target.value)} required minLength={12} maxLength={128}/>
+        <input id="admin-password" name="password" type="password" autoComplete={mode === 'setup' ? 'new-password' : 'current-password'} value={password} onChange={(event) => setPassword(event.target.value)} required minLength={mode === 'setup' ? 12 : 1} maxLength={128}/>
         {error && <p className="auth-error" role="alert">{error}</p>}
         <button className="auth-submit" type="submit" disabled={busy}>{busy ? 'Please wait…' : mode === 'setup' ? 'Create administrator account' : 'Sign in'}</button>
         {mode === 'setup' && <p className="auth-privacy">This form is available until the first administrator account is created.</p>}
