@@ -1,0 +1,80 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      NODE_ENV: production
+      PORT: "4009"
+      MONGODB_URI: ${MONGODB_URI:?Set MONGODB_URI in .env.production}
+      MONGODB_DATABASE: ${MONGODB_DATABASE:-itc_field_source}
+      MANAGER_ORIGIN: ${MANAGER_ORIGIN:?Set MANAGER_ORIGIN to the HTTPS Manager origin}
+      STORAGE_DRIVER: s3
+      AWS_REGION: ${AWS_REGION:?Set AWS_REGION in .env.production}
+      S3_BUCKET_NAME: ${S3_BUCKET_NAME:?Set S3_BUCKET_NAME in .env.production}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY in .env.production}
+      OPENAI_ANALYSIS_MODEL: ${OPENAI_ANALYSIS_MODEL:-gpt-4o-mini}
+      MODAL_DIARIZATION_URL: ${MODAL_DIARIZATION_URL:?Set MODAL_DIARIZATION_URL in .env.production}
+      MODAL_DIARIZATION_KEY: ${MODAL_DIARIZATION_KEY:?Set MODAL_DIARIZATION_KEY in .env.production}
+      MODAL_DIARIZATION_SECRET: ${MODAL_DIARIZATION_SECRET:?Set MODAL_DIARIZATION_SECRET in .env.production}
+      S3_RECORDING_PREFIX: ${S3_RECORDING_PREFIX:-field-source/recordings}
+      S3_TRANSCRIPT_PREFIX: ${S3_TRANSCRIPT_PREFIX:-field-source/transcripts}
+      S3_PRESIGNED_URL_TTL_SECONDS: ${S3_PRESIGNED_URL_TTL_SECONDS:-900}
+    ports:
+      - "127.0.0.1:4009:4009"
+    volumes:
+      - api-upload-staging:/app/apps/api/var/upload-staging
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
+  manager:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: manager
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      PORT: "3000"
+      API_ORIGIN: http://api:4009
+      STATIC_ROOT: /app/public
+    ports:
+      - "127.0.0.1:4007:3000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
+  field-pwa:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: field-pwa
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      PORT: "3000"
+      API_ORIGIN: http://api:4009
+      STATIC_ROOT: /app/public
+    ports:
+      - "127.0.0.1:4008:3000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  api-upload-staging:

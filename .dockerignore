@@ -1,0 +1,17 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.production.example
+**/node_modules
+**/dist
+**/coverage
+**/.turbo
+**/var
+**/uploads
+.codex
+.agents
+certs
+test-fixtures
+playwright-report
+test-results

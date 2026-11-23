@@ -7,5 +7,8 @@ coverage
 playwright-report
 test-results
 .env
+.env.production
+.env.production.local
+certs/
 apps/api/uploads/
 apps/api/var/
