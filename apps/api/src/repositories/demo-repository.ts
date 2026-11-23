@@ -1,5 +1,7 @@
 import type {
   AnalysisState,
+  ConversationAnalysisState,
+  DenoisedAnalysisAudioInput,
   RecordingMetadata,
   SyncState
 } from '@itc/domain';
@@ -28,6 +30,7 @@ export interface CreateRecordingInput {
   durationSeconds: number;
   mimeType: string;
   byteLength: number;
+  denoisedAnalysisAudio?: DenoisedAnalysisAudioInput;
 }
 
 export interface RecordingFilters {
@@ -68,10 +71,13 @@ export interface RecordingRepository {
   getRecording(id: string): Promise<RecordingMetadata | undefined>;
   deleteRecording(id: string): Promise<void>;
   getRecordingVisitId(id: string): Promise<string | undefined>;
-  getAnalysisStatus(id: string): Promise<Pick<RecordingMetadata, 'id' | 'syncState' | 'analysisState'> | undefined>;
+  getAnalysisStatus(id: string): Promise<Pick<RecordingMetadata, 'id' | 'syncState' | 'analysisState' | 'conversationAnalysisState'> | undefined>;
   listRecordings(filters: RecordingFilters): Promise<RecordingPage>;
   completeRecording(id: string, stored: StoredObjectMetadata): Promise<RecordingMetadata | undefined>;
+  completeDenoisedAnalysisAudio(id: string, stored: StoredObjectMetadata): Promise<RecordingMetadata | undefined>;
   transitionAnalysisState(id: string, next: AnalysisState): Promise<boolean>;
+  transitionConversationAnalysisState(id: string, next: ConversationAnalysisState): Promise<boolean>;
+  findRecordingsWithoutTranscription(limit?: number): Promise<string[]>;
 }
 
 function visitInputMatches(visit: VisitRecord, input: CreateVisitInput): boolean {
@@ -82,10 +88,24 @@ function visitInputMatches(visit: VisitRecord, input: CreateVisitInput): boolean
 }
 
 function recordingInputMatches(recording: RecordingMetadata, input: CreateRecordingInput): boolean {
+  const existingAudio = recording.denoisedAnalysisAudio;
+  const incomingAudio = input.denoisedAnalysisAudio;
+  const inputAudioMatches = !existingAudio && !incomingAudio
+    || Boolean(existingAudio && incomingAudio
+      && existingAudio.state === incomingAudio.state
+      && existingAudio.mimeType === incomingAudio.mimeType
+      && existingAudio.byteLength === incomingAudio.byteLength
+      && (incomingAudio.sha256 === undefined || existingAudio.sha256 === incomingAudio.sha256)
+      && existingAudio.sampleRateHz === incomingAudio.sampleRateHz
+      && existingAudio.durationSeconds === incomingAudio.durationSeconds
+      && existingAudio.model === incomingAudio.model
+      && existingAudio.modelVersion === incomingAudio.modelVersion
+      && existingAudio.errorCode === incomingAudio.errorCode);
   return recording.startedAt === input.startedAt
     && recording.durationSeconds === input.durationSeconds
     && recording.mimeType === input.mimeType
-    && recording.byteLength === input.byteLength;
+    && recording.byteLength === input.byteLength
+    && inputAudioMatches;
 }
 
 const allowedAnalysisTransitions: Record<AnalysisState, readonly AnalysisState[]> = {
@@ -149,7 +169,14 @@ export class DemoRecordingRepository implements RecordingRepository {
       mimeType: input.mimeType,
       byteLength: input.byteLength,
       syncState: 'queued',
-      analysisState: 'not_started'
+      analysisState: 'not_started',
+      conversationAnalysisState: input.denoisedAnalysisAudio && input.denoisedAnalysisAudio.state !== 'ready' ? 'failed' : 'not_started',
+      ...(input.denoisedAnalysisAudio ? {
+        denoisedAnalysisAudio: {
+          ...input.denoisedAnalysisAudio,
+          syncState: input.denoisedAnalysisAudio.state === 'ready' ? 'queued' as const : 'error' as const
+        }
+      } : {})
     };
 
     this.recordings.set(recording.id, recording);
@@ -178,13 +205,14 @@ export class DemoRecordingRepository implements RecordingRepository {
     return await this.getRecording(id) ? this.visitByRecordingId.get(id) : undefined;
   }
 
-  async getAnalysisStatus(id: string): Promise<Pick<RecordingMetadata, 'id' | 'syncState' | 'analysisState'> | undefined> {
+  async getAnalysisStatus(id: string): Promise<Pick<RecordingMetadata, 'id' | 'syncState' | 'analysisState' | 'conversationAnalysisState'> | undefined> {
     const recording = await this.getRecording(id);
     if (!recording) return undefined;
     return {
       id: recording.id,
       syncState: recording.syncState,
-      analysisState: recording.analysisState
+      analysisState: recording.analysisState,
+      conversationAnalysisState: recording.conversationAnalysisState
     };
   }
 
@@ -219,10 +247,41 @@ export class DemoRecordingRepository implements RecordingRepository {
     return recording;
   }
 
+  async completeDenoisedAnalysisAudio(id: string, stored: StoredObjectMetadata): Promise<RecordingMetadata | undefined> {
+    const recording = this.recordings.get(id);
+    const audio = recording?.denoisedAnalysisAudio;
+    if (!recording || recording.syncState !== 'uploaded' || !audio || audio.state !== 'ready'
+      || audio.byteLength !== stored.byteLength || audio.mimeType !== stored.mimeType
+      || (audio.sha256 !== undefined && audio.sha256 !== stored.sha256)) return undefined;
+    recording.denoisedAnalysisAudio = {
+      ...audio, syncState: 'uploaded', objectKey: stored.objectKey,
+      byteLength: stored.byteLength, mimeType: stored.mimeType, sha256: stored.sha256
+    };
+    return recording;
+  }
+
   async transitionAnalysisState(id: string, next: AnalysisState): Promise<boolean> {
     const recording = this.recordings.get(id);
     if (!recording || !allowedAnalysisTransitions[recording.analysisState].includes(next)) return false;
     recording.analysisState = next;
     return true;
+  }
+
+  async transitionConversationAnalysisState(id: string, next: ConversationAnalysisState): Promise<boolean> {
+    const recording = this.recordings.get(id);
+    if (!recording) return false;
+    recording.conversationAnalysisState = next;
+    return true;
+  }
+
+  async findRecordingsWithoutTranscription(): Promise<string[]> {
+    return Array.from(this.recordings.values())
+      .filter((recording) => recording.syncState === 'uploaded'
+        && recording.denoisedAnalysisAudio?.state === 'ready'
+        && recording.denoisedAnalysisAudio.sampleRateHz === 48_000
+        && Boolean(recording.denoisedAnalysisAudio.durationSeconds)
+        && recording.denoisedAnalysisAudio.syncState === 'uploaded'
+        && Boolean(recording.denoisedAnalysisAudio.objectKey))
+      .map(({ id }) => id);
   }
 }

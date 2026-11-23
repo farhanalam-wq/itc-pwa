@@ -1,0 +1,48 @@
+{
+  "created_utc": "2026-11-22T15:20:26.083196+00:00",
+  "speech_source": "output/conversation_001/conversation.wav",
+  "noise_source": "assets/traffice-noise.mp3",
+  "clean_reference": "clean_reference.wav",
+  "duration_seconds": 264.748833,
+  "sample_rate_hz": 24000,
+  "channels": 1,
+  "encoding": "PCM_16",
+  "market_excerpt_start_seconds": 0.0,
+  "market_excerpt_duration_seconds": 264.748833,
+  "activity_detection": "transcript intervals (output/conversation_001/transcript.json)",
+  "active_speech_duration_seconds": 257.247,
+  "speech_rms_before_shared_gain": 0.15911365,
+  "background_rms_before_scaling": 0.05418571,
+  "shared_anti_clipping_gain": 0.23125206,
+  "level_definition": "noise RMS amplitude as % of speech RMS, measured during active speech",
+  "variants": [
+    {
+      "file": "noise_80.wav",
+      "noise_rms_as_percent_of_speech": 80,
+      "target_snr_db": 1.938,
+      "measured_active_speech_snr_db": 1.938,
+      "noise_gain_before_shared_attenuation": 2.34916047
+    },
+    {
+      "file": "noise_100.wav",
+      "noise_rms_as_percent_of_speech": 100,
+      "target_snr_db": -0.0,
+      "measured_active_speech_snr_db": 0.0,
+      "noise_gain_before_shared_attenuation": 2.93645059
+    },
+    {
+      "file": "noise_125.wav",
+      "noise_rms_as_percent_of_speech": 125,
+      "target_snr_db": -1.938,
+      "measured_active_speech_snr_db": -1.938,
+      "noise_gain_before_shared_attenuation": 3.67056324
+    },
+    {
+      "file": "noise_150.wav",
+      "noise_rms_as_percent_of_speech": 150,
+      "target_snr_db": -3.522,
+      "measured_active_speech_snr_db": -3.522,
+      "noise_gain_before_shared_attenuation": 4.40467589
+    }
+  ]
+}

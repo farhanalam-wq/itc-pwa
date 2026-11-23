@@ -5,7 +5,7 @@ import { join } from 'node:path';
 
 import type { RecordingTranscriptTurn } from '@itc/domain';
 import type { TranscriptionJob } from '../repositories/mongo-transcription-repository';
-import { BYTES_PER_MS, MAX_RECORDING_MS, SAMPLE_RATE, makeClips, readTimeline, wavFromPcm } from './diarization-audio';
+import { BYTES_PER_MS, MAX_RECORDING_MS, MIN_TRANSCRIBABLE_CLIP_MS, SAMPLE_RATE, makeClips, readTimeline, wavFromPcm } from './diarization-audio';
 import { ModalDiarizationClient, ModalJobFailedError } from './modal-diarization';
 import { AudioTranscriptionError, OPENAI_TRANSCRIPTION_MODEL, type AudioTranscriptionProvider } from './openai-transcription';
 
@@ -75,18 +75,27 @@ export class DiarizedTranscriptionPipeline {
     job: TranscriptionJob;
     bytes: Uint8Array;
     mimeType: string;
+    expectedDurationSeconds?: number;
     provider: AudioTranscriptionProvider;
     checkpoint: Checkpoint;
     signal: AbortSignal;
   }) {
     const { job, bytes, mimeType, provider, checkpoint, signal } = input;
     const pcm = await decodeRecording(bytes, mimeType, signal);
+    if (input.expectedDurationSeconds !== undefined) {
+      const decodedDurationSeconds = pcm.length / (SAMPLE_RATE * 2);
+      const toleranceSeconds = Math.max(2, Math.min(5, input.expectedDurationSeconds * 0.05));
+      if (Math.abs(decodedDurationSeconds - input.expectedDurationSeconds) > toleranceSeconds) {
+        throw new AudioTranscriptionError('denoised_audio_duration_mismatch', 'The denoised analysis audio duration did not match its registered metadata.');
+      }
+    }
     const audioSha256 = createHash('sha256').update(pcm).digest('hex');
     let progress = job.diarization ?? { audioSha256 };
     if (progress.audioSha256 && progress.audioSha256 !== audioSha256) {
       throw new AudioTranscriptionError('transcription_failed', 'Decoded audio differs from the original transcription attempt.');
     }
     let clips = progress.clips;
+    let diarizer = progress.diarizer;
     if (!clips) {
       await checkpoint('diarizing', progress);
       let response: Awaited<ReturnType<ModalDiarizationClient['run']>>;
@@ -110,12 +119,18 @@ export class DiarizedTranscriptionPipeline {
       }
       const timeline = readTimeline(response.timeline, Math.round(pcm.length / BYTES_PER_MS));
       clips = makeClips(timeline.turns, timeline.overlaps).map((clip, index) => ({ id: `turn-${index + 1}`, ...clip }));
-      if (clips.length > MAX_CLIPS) {
-        throw new AudioTranscriptionError('transcription_failed', 'The diarizer returned too many speech clips.');
-      }
-      progress = { ...progress, audioSha256, diarizer: { model: timeline.source, revision: response.modelRevision }, clips };
-      await checkpoint('transcribing', progress);
+      diarizer = { model: timeline.source, revision: response.modelRevision };
     }
+
+    // Modal can emit tiny speaker fragments at turn boundaries. Keep these out
+    // of provider requests because sub-100 ms WAV clips are routinely rejected,
+    // and apply the same rule when resuming a job with saved diarization data.
+    clips = clips.filter((clip) => clip.endMs - clip.startMs >= MIN_TRANSCRIBABLE_CLIP_MS);
+    if (clips.length > MAX_CLIPS) {
+      throw new AudioTranscriptionError('transcription_failed', 'The diarizer returned too many speech clips.');
+    }
+    progress = { ...progress, audioSha256, ...(diarizer ? { diarizer } : {}), clips };
+    await checkpoint('transcribing', progress);
 
     for (const clip of clips) {
       if (clip.text !== undefined) continue;

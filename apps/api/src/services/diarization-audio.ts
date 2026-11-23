@@ -3,6 +3,7 @@ export const BYTES_PER_MS = SAMPLE_RATE * 2 / 1000;
 export const MAX_RECORDING_MS = 600_000;
 const MAX_CLIP_MS = 30_000;
 const MERGE_GAP_MS = 250;
+export const MIN_TRANSCRIBABLE_CLIP_MS = 100;
 
 interface Interval {
   startMs: number;
@@ -70,7 +71,7 @@ export function makeClips(turns: SpeakerInterval[], overlaps: Interval[]) {
         overlapsSpeech: overlaps.some((overlap) => startMs < overlap.endMs && overlap.startMs < endMs)
       };
     });
-  });
+  }).filter((clip) => clip.endMs - clip.startMs >= MIN_TRANSCRIBABLE_CLIP_MS);
 }
 
 export function wavFromPcm(pcm: Uint8Array) {

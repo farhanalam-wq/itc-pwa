@@ -29,11 +29,13 @@ export interface TranscriptionJob {
   errorMessage?: string;
   retryable?: boolean;
   providerRequestId?: string;
+  analysisAudioObjectKey?: string;
+  analysisAudioSha256?: string;
 }
 
 export interface TranscriptionJobRepository {
-  enqueue(recordingId: string, model?: string, mode?: 'diarized'): Promise<TranscriptionJob>;
-  reprocess(recordingId: string): Promise<TranscriptionJob | undefined>;
+  enqueue(recordingId: string, model?: string, mode?: 'diarized', artifact?: { objectKey: string; sha256: string }): Promise<TranscriptionJob>;
+  reprocess(recordingId: string, artifact?: { objectKey: string; sha256: string }): Promise<TranscriptionJob | undefined>;
   checkpoint(recordingId: string, attempt: number, update: Partial<Pick<TranscriptionJob, 'stage' | 'diarization'>>): Promise<boolean>;
   retry(recordingId: string): Promise<TranscriptionJob | undefined>;
   get(recordingId: string): Promise<TranscriptionJob | undefined>;
@@ -94,7 +96,12 @@ export class MongoTranscriptionRepository {
   }
 
   /** Creates the durable queue entry once. Repeated calls leave completed jobs untouched. */
-  async enqueue(recordingId: string, model = 'gpt-transcribe', mode?: 'diarized'): Promise<TranscriptionJob> {
+  async enqueue(
+    recordingId: string,
+    model = 'gpt-transcribe',
+    mode?: 'diarized',
+    artifact?: { objectKey: string; sha256: string }
+  ): Promise<TranscriptionJob> {
     const now = new Date();
     await this.jobs.updateOne(
       { recordingId },
@@ -105,6 +112,7 @@ export class MongoTranscriptionRepository {
           provider: 'openai',
           model,
           ...(mode ? { mode } : {}),
+          ...(artifact ? { analysisAudioObjectKey: artifact.objectKey, analysisAudioSha256: artifact.sha256 } : {}),
           attempts: 0,
           createdAt: now,
           updatedAt: now
@@ -114,15 +122,24 @@ export class MongoTranscriptionRepository {
     );
     const job = await this.get(recordingId);
     if (!job) throw new Error('The transcription job could not be created.');
+    if (artifact && (job.analysisAudioObjectKey !== artifact.objectKey || job.analysisAudioSha256 !== artifact.sha256)) {
+      throw new Error('A transcription job is already bound to a different denoised analysis audio artifact.');
+    }
     return job;
   }
 
-  async reprocess(recordingId: string): Promise<TranscriptionJob | undefined> {
+  async reprocess(recordingId: string, artifact?: { objectKey: string; sha256: string }): Promise<TranscriptionJob | undefined> {
     const updated = await this.jobs.findOneAndUpdate(
-      { recordingId, state: 'completed' },
+      { recordingId, state: { $in: ['completed', 'failed'] } },
       {
-        $set: { state: 'queued', mode: 'diarized', updatedAt: new Date() },
-        $unset: { stage: '', diarization: '' }
+        $set: {
+          state: 'queued', mode: 'diarized', updatedAt: new Date(),
+          ...(artifact ? { analysisAudioObjectKey: artifact.objectKey, analysisAudioSha256: artifact.sha256 } : {})
+        },
+        $unset: {
+          stage: '', diarization: '', errorCode: '', errorMessage: '', retryable: '', processingStartedAt: '',
+          completedAt: '', transcriptText: '', turns: '', diarizer: '', languageCodes: ''
+        }
       },
       { returnDocument: 'after' }
     );

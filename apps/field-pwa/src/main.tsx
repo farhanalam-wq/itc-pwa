@@ -7,10 +7,17 @@ import {
   getOpfsSupport,
   recordingStore,
   type LocalRecording,
+  type DenoisedAudioWriter,
   type RecordingWriter,
   type RecoveryReport,
   type StorageSnapshot
 } from './storage';
+import {
+  createDeepFilterSession,
+  type DeepFilterFailureReason,
+  type DeepFilterSession,
+  type DeepFilterTelemetryEvent
+} from './audio/deepfilter-session';
 import { startMetadataRegistrationSync, type MetadataRegistrationSyncController } from './sync/metadata-registration';
 import { uploadPendingAudio, type ChunkUploadProgress } from './sync/audio-upload';
 import './styles.css';
@@ -18,6 +25,54 @@ import './styles.css';
 type Screen = 'capture' | 'history';
 type RecorderState = 'ready' | 'starting' | 'recording' | 'paused' | 'stopping';
 type Notice = { kind: 'info' | 'success' | 'error'; text: string };
+interface ActiveDenoisedCapture {
+  recorder: MediaRecorder;
+  writer?: DenoisedAudioWriter;
+  session: DeepFilterSession;
+  done: Promise<void>;
+  finish: () => void;
+  pendingChunks: Blob[];
+  pendingBytes: number;
+  writerReady: Promise<void>;
+  failure?: { reason: string; errorCode: string; state: 'failed' | 'incomplete' | 'unsupported' };
+}
+
+function denoiserFailureState(reason?: DeepFilterFailureReason): 'failed' | 'unsupported' {
+  return reason === 'insecure_context'
+    || reason === 'audio_context_unavailable'
+    || reason === 'audio_worklet_unavailable'
+    || reason === 'audio_track_unavailable'
+    || reason === 'context_sample_rate_unsupported'
+    ? 'unsupported'
+    : 'failed';
+}
+
+function normalizeMimeType(value: string): string {
+  return value.toLowerCase().replace(/\s/g, '');
+}
+
+function logDenoiserTelemetry(event: DeepFilterTelemetryEvent): void {
+  const details = (() => {
+    switch (event.type) {
+      case 'model_initialized': return { latencyMs: Math.round(event.latencyMs) };
+      case 'load_report': return {
+        windows: event.report.windows,
+        p95Load: event.report.p95Load,
+        maxLoad: event.report.maxLoad,
+        slowFrames: event.report.slowFrames,
+        qualified: event.qualified
+      };
+      case 'overload': return { load: event.load };
+      case 'fallback': return { reason: event.reason, message: event.message };
+      case 'capability_check': return { supported: event.supported, reason: event.reason };
+      case 'qualification_cache': return { cacheHit: event.cacheHit, p95Load: event.p95Load };
+      case 'resource_cleanup': return { contextClosed: event.contextClosed, processedTracksStopped: event.processedTracksStopped };
+      case 'initialization_started': return {};
+    }
+  })();
+  if (event.type === 'fallback' || event.type === 'overload') console.warn('[field-audio] denoiser', event.type, details);
+  else console.info('[field-audio] denoiser', event.type, details);
+}
 
 const apiClient = createApiClient({ baseUrl: import.meta.env.VITE_API_BASE_URL || '/api' });
 const initialMeter = Array.from({ length: 21 }, (_, index) => 0.18 + (index % 4) * 0.025);
@@ -181,11 +236,14 @@ function FieldApp() {
   const [chunkQueue, setChunkQueue] = useState<ChunkUploadProgress[]>([]);
   const writerRef = useRef<RecordingWriter | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
+  const denoisedCaptureRef = useRef<ActiveDenoisedCapture | null>(null);
+  const denoiserSessionRef = useRef<DeepFilterSession | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const startedAtRef = useRef(0);
   const pausedAtRef = useRef(0);
   const pausedDurationRef = useRef(0);
   const writeErrorRef = useRef<string | null>(null);
+  const denoisedStateWriteRef = useRef<Promise<unknown> | null>(null);
   const syncRef = useRef<MetadataRegistrationSyncController | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const meterSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
@@ -199,6 +257,46 @@ function FieldApp() {
   const orderedRecords = useMemo(() => [...records].sort((a, b) => b.startedAt.localeCompare(a.startedAt)), [records]);
   const displayRecords = orderedRecords.filter((record) => record.localState !== 'recording');
   const [hours, minutes, seconds] = formatElapsed(elapsed);
+
+  useEffect(() => {
+    if (screen !== 'capture') {
+      if (recorderState === 'ready') {
+        const session = denoiserSessionRef.current;
+        denoiserSessionRef.current = null;
+        void session?.dispose();
+      }
+      return;
+    }
+    if (denoiserSessionRef.current) return;
+
+    const session = createDeepFilterSession({
+      onTelemetry: (event) => {
+        logDenoiserTelemetry(event);
+        if ((event.type === 'overload' || (event.type === 'load_report' && !event.qualified))) {
+          const capture = denoisedCaptureRef.current;
+          if (capture) {
+            capture.failure = {
+              reason: event.type === 'overload' ? 'DeepFilterNet exceeded its processing load limit.' : 'This device did not meet the denoising performance target.',
+              errorCode: event.type === 'overload' ? 'denoiser_overloaded' : 'denoiser_performance_unqualified',
+              state: 'failed'
+            };
+            setNotice({
+              kind: 'info',
+              text: 'The original recording is safe, but its denoised analysis copy could not be completed. Pyannote will not receive the original audio for this recording.'
+            });
+            if (capture.recorder.state !== 'inactive') capture.recorder.stop();
+          }
+        }
+      }
+    });
+    denoiserSessionRef.current = session;
+  }, [screen, recorderState]);
+
+  useEffect(() => () => {
+    const session = denoiserSessionRef.current;
+    denoiserSessionRef.current = null;
+    void session?.dispose();
+  }, []);
 
   const refreshLocalState = useCallback(async () => {
     try {
@@ -369,6 +467,173 @@ function FieldApp() {
     }
   }
 
+  function startDenoisedCapture(
+    recordingId: string,
+    stream: MediaStream,
+    mimeType: string,
+    session: DeepFilterSession | null
+  ): void {
+    const markUnavailable = (reason: string, errorCode: string, state: 'failed' | 'unsupported' | 'incomplete' = 'failed') => {
+      denoisedStateWriteRef.current = recordingStore.markDenoisedAudioUnavailable(recordingId, reason, state, errorCode).catch(() => undefined);
+      setNotice({
+        kind: 'info',
+        text: 'The original recording is safe, but a complete denoised analysis copy is unavailable. Pyannote will not receive the original audio for this recording.'
+      });
+    };
+
+    if (!session || session.state !== 'ready') {
+      const reason = session?.reason ?? (session?.state === 'initializing' ? 'model_not_ready_at_record_tap' : 'denoiser_not_available');
+      const state = denoiserFailureState(session?.reason);
+      markUnavailable(reason, session?.reason ?? 'denoiser_not_ready', session?.reason ? state : 'failed');
+      return;
+    }
+
+    const attached = session.attachReady(stream);
+    if (!attached.attached) {
+      const state = denoiserFailureState(attached.reason);
+      markUnavailable(attached.reason, attached.reason, state);
+      return;
+    }
+
+    let recorder: MediaRecorder;
+    try {
+      if (!mimeType || !MediaRecorder.isTypeSupported(mimeType)) {
+        throw new Error('The browser cannot record the denoised analysis stream in the original recording format.');
+      }
+      recorder = new MediaRecorder(attached.stream, { mimeType });
+      if (recorder.mimeType && normalizeMimeType(recorder.mimeType) !== normalizeMimeType(mimeType)) {
+        throw new Error('The denoised analysis stream selected a different recording format.');
+      }
+    } catch (error) {
+      markUnavailable(error instanceof Error ? error.message : 'Denoised analysis capture could not start.', 'denoised_capture_start_failed');
+      void session.detach();
+      return;
+    }
+
+    let finish!: () => void;
+    const done = new Promise<void>((resolve) => { finish = resolve; });
+    const capture: ActiveDenoisedCapture = {
+      recorder,
+      session,
+      done,
+      finish,
+      pendingChunks: [],
+      pendingBytes: 0,
+      writerReady: Promise.resolve()
+    };
+    denoisedCaptureRef.current = capture;
+
+    const appendChunk = (chunk: Blob) => {
+      if (!chunk.size || capture.failure) return;
+      const writer = capture.writer;
+      if (!writer) {
+        capture.pendingBytes += chunk.size;
+        if (capture.pendingBytes > 8 * 1024 * 1024) {
+          capture.failure = {
+            reason: 'Local storage did not become ready for denoised audio in time.',
+            errorCode: 'denoised_sidecar_storage_delayed',
+            state: 'failed'
+          };
+          if (recorder.state !== 'inactive') recorder.stop();
+          return;
+        }
+        capture.pendingChunks.push(chunk);
+        return;
+      }
+      void writer.append(chunk).catch((error) => {
+        capture.failure = {
+          reason: error instanceof Error ? error.message : 'The denoised audio could not be saved locally.',
+          errorCode: 'denoised_audio_storage_failed',
+          state: 'failed'
+        };
+        setNotice({ kind: 'info', text: 'The original recording is safe, but its denoised copy could not be saved. Pyannote will not receive the original audio for this recording.' });
+        if (recorder.state !== 'inactive') recorder.stop();
+      });
+    };
+
+    recorder.addEventListener('dataavailable', (event) => appendChunk(event.data));
+    recorder.addEventListener('error', () => {
+      capture.failure = {
+        reason: 'The browser could not record the denoised analysis stream.',
+        errorCode: 'denoised_media_recorder_failed',
+        state: 'failed'
+      };
+      if (recorder.state !== 'inactive') recorder.stop();
+    }, { once: true });
+    recorder.addEventListener('stop', () => {
+      void (async () => {
+        try {
+          await capture.writerReady;
+          if (capture.failure) {
+            if (capture.writer) await capture.writer.discard(capture.failure.reason, capture.failure.state, capture.failure.errorCode);
+            else await recordingStore.markDenoisedAudioUnavailable(recordingId, capture.failure.reason, capture.failure.state, capture.failure.errorCode);
+          } else if (session.qualificationState !== 'qualified') {
+            if (capture.writer) {
+              await capture.writer.discard(
+                'Device performance qualification did not complete before this recording stopped.',
+                'incomplete',
+                'denoiser_qualification_pending'
+              );
+            } else {
+              await recordingStore.markDenoisedAudioUnavailable(
+                recordingId,
+                'Device performance qualification did not complete before this recording stopped.',
+                'incomplete',
+                'denoiser_qualification_pending'
+              );
+            }
+          } else if (capture.writer) {
+            await capture.writer.finalize();
+          }
+        } catch (error) {
+          if (capture.writer) {
+            await capture.writer.discard(error instanceof Error ? error.message : 'Denoised analysis audio finalization failed.');
+          } else {
+            await recordingStore.markDenoisedAudioUnavailable(recordingId, 'Denoised analysis audio could not be finalized.', 'failed', 'denoised_audio_finalize_failed');
+          }
+        } finally {
+          if (denoisedCaptureRef.current === capture) denoisedCaptureRef.current = null;
+          await session.detach();
+          capture.finish();
+        }
+      })();
+    }, { once: true });
+
+    capture.writerReady = recordingStore.createDenoisedAudioWriter(recordingId, mimeType).then(async (writer) => {
+      capture.writer = writer;
+      if (capture.failure) {
+        await writer.discard(capture.failure.reason, capture.failure.state, capture.failure.errorCode);
+        return;
+      }
+      const queued = capture.pendingChunks;
+      capture.pendingChunks = [];
+      capture.pendingBytes = 0;
+      for (const chunk of queued) await writer.append(chunk);
+    }).catch((error) => {
+      capture.failure = {
+        reason: error instanceof Error ? error.message : 'The denoised analysis file could not be opened.',
+        errorCode: 'denoised_sidecar_storage_failed',
+        state: 'failed'
+      };
+      setNotice({ kind: 'info', text: 'The original recording is safe, but its denoised copy could not be saved. Pyannote will not receive the original audio for this recording.' });
+      if (recorder.state !== 'inactive') recorder.stop();
+    });
+
+    try {
+      recorder.start(1000);
+    } catch (error) {
+      capture.failure = {
+        reason: error instanceof Error ? error.message : 'The denoised analysis recorder could not start.',
+        errorCode: 'denoised_media_recorder_start_failed',
+        state: 'failed'
+      };
+      denoisedStateWriteRef.current = recordingStore.markDenoisedAudioUnavailable(recordingId, capture.failure.reason, 'failed', capture.failure.errorCode).catch(() => undefined);
+      if (denoisedCaptureRef.current === capture) denoisedCaptureRef.current = null;
+      void session.detach();
+      capture.finish();
+    }
+  }
+
   async function handleStart() {
     setNotice(null);
     if (!support.supported) {
@@ -380,10 +645,23 @@ function FieldApp() {
       return;
     }
 
+    const denoiserSessionAtTap = denoiserSessionRef.current;
+    const denoiserReadyAtTap = denoiserSessionAtTap?.state === 'ready';
     setRecorderState('starting');
+    // This is called directly from the Record gesture. It is best-effort and
+    // does not delay the original capture or wait for a pending model load.
+    void denoiserSessionAtTap?.activate();
     try {
+      const audioConstraints = denoiserReadyAtTap
+        ? {
+          ...(microphoneId ? { deviceId: { exact: microphoneId } } : {}),
+          echoCancellation: true,
+          noiseSuppression: false,
+          autoGainControl: false
+        }
+        : microphoneId ? { deviceId: { exact: microphoneId } } : true;
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: microphoneId ? { deviceId: { exact: microphoneId } } : true
+        audio: audioConstraints
       });
       streamRef.current = stream;
       void refreshMicrophones().catch(() => undefined);
@@ -420,10 +698,38 @@ function FieldApp() {
       }, { once: true });
       recorder.start(1000);
       setRecorderState('recording');
+      if (denoiserReadyAtTap
+        && denoiserSessionAtTap === denoiserSessionRef.current
+        && denoiserSessionAtTap?.state === 'ready') {
+        // This branch starts synchronously after the original recorder. Its
+        // sidecar OPFS writer initializes in the background and buffers only
+        // the first bounded recorder chunks while OPFS opens.
+        startDenoisedCapture(writer.recording.id, stream, mimeType, denoiserSessionAtTap);
+      } else {
+        const reason = denoiserSessionAtTap?.reason
+          ?? (denoiserSessionAtTap?.state === 'initializing' ? 'model_not_ready_at_record_tap' : 'denoiser_not_ready_at_record_tap');
+        const state = denoiserFailureState(denoiserSessionAtTap?.reason);
+        denoisedStateWriteRef.current = recordingStore.markDenoisedAudioUnavailable(
+          writer.recording.id,
+          reason,
+          denoiserSessionAtTap?.reason ? state : 'failed',
+          denoiserSessionAtTap?.reason ?? 'denoiser_not_ready_at_record_tap'
+        ).catch(() => undefined);
+        setNotice({
+          kind: 'info',
+          text: 'The original recording is active, but DeepFilterNet was not ready when recording started. Pyannote will not receive the original audio for this recording.'
+        });
+      }
       void startMeter(stream);
       if (!isPersistent) void recordingStore.requestDurability().then((value) => setIsPersistent(value)).catch(() => undefined);
       await refreshLocalState();
     } catch (error) {
+      const failedCapture = denoisedCaptureRef.current;
+      if (failedCapture && failedCapture.recorder.state !== 'inactive') {
+        failedCapture.failure = { reason: 'Original recording startup failed.', errorCode: 'raw_recording_start_failed', state: 'failed' };
+        failedCapture.recorder.stop();
+        await failedCapture.done;
+      }
       streamRef.current?.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
       const writer = writerRef.current;
@@ -456,6 +762,12 @@ function FieldApp() {
 
     let saved = false;
     try {
+      const denoisedCapture = denoisedCaptureRef.current;
+      if (denoisedCapture) {
+        if (denoisedCapture.recorder.state !== 'inactive') denoisedCapture.recorder.stop();
+        await denoisedCapture.done;
+      }
+      await denoisedStateWriteRef.current?.catch(() => undefined);
       if (writeErrorRef.current) throw new Error(writeErrorRef.current);
       const recording = await writer.finalize(durationSeconds);
       if (recording.byteLength === 0) {
@@ -482,6 +794,8 @@ function FieldApp() {
     const recorder = recorderRef.current;
     if (!recorder || recorder.state !== 'recording') return;
     recorder.pause();
+    const denoisedRecorder = denoisedCaptureRef.current?.recorder;
+    if (denoisedRecorder?.state === 'recording') denoisedRecorder.pause();
     pausedAtRef.current = Date.now();
     setElapsed(Math.max(0, Math.floor((pausedAtRef.current - startedAtRef.current - pausedDurationRef.current) / 1000)));
     setRecorderState('paused');
@@ -495,6 +809,8 @@ function FieldApp() {
     pausedDurationRef.current += Date.now() - pausedAtRef.current;
     pausedAtRef.current = 0;
     recorder.resume();
+    const denoisedRecorder = denoisedCaptureRef.current?.recorder;
+    if (denoisedRecorder?.state === 'paused') denoisedRecorder.resume();
     setRecorderState('recording');
     if (streamRef.current) void startMeter(streamRef.current);
   }
@@ -503,6 +819,8 @@ function FieldApp() {
     const recorder = recorderRef.current;
     if (!recorder || recorder.state === 'inactive') return;
     setRecorderState('stopping');
+    const denoisedRecorder = denoisedCaptureRef.current?.recorder;
+    if (denoisedRecorder && denoisedRecorder.state !== 'inactive') denoisedRecorder.stop();
     recorder.stop();
   }
 
@@ -630,10 +948,14 @@ function FieldApp() {
   </div>;
 }
 
-registerFieldServiceWorker();
-
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <FieldApp/>
-  </StrictMode>
-);
+if (import.meta.env.DEV && window.location.pathname === '/__noise-fixtures') {
+  const { NoiseFixtureRunner } = await import('./dev/noise-fixture-runner');
+  createRoot(document.getElementById('root')!).render(<NoiseFixtureRunner/>);
+} else {
+  registerFieldServiceWorker();
+  createRoot(document.getElementById('root')!).render(
+    <StrictMode>
+      <FieldApp/>
+    </StrictMode>
+  );
+}

@@ -20,6 +20,8 @@ export interface FinalRecordingInput {
   mimeType: string;
   /** Complete merged conversation bytes. Transport chunks must be assembled before this call. */
   bytes: Uint8Array;
+  /** Names the separately stored denoised analysis artifact while preserving the original key. */
+  artifact?: 'analysis';
 }
 
 export interface RecordingObjectStorage {
@@ -54,11 +56,12 @@ function audioExtension(mimeType: string): string {
   return 'audio';
 }
 
-function stableKey(prefix: string, input: Pick<FinalRecordingInput, 'id' | 'startedAt' | 'mimeType'>): string {
+function stableKey(prefix: string, input: Pick<FinalRecordingInput, 'id' | 'startedAt' | 'mimeType' | 'artifact'>): string {
   if (!input.id.trim() || input.id.includes('/') || input.id.includes('\\') || input.id === '.' || input.id === '..') {
     throw new RecordingStorageError('Recording id is invalid for object storage.');
   }
-  return [prefix, ...datePath(input.startedAt), `${encodeURIComponent(input.id)}.${audioExtension(input.mimeType)}`]
+  const suffix = input.artifact === 'analysis' ? '.analysis' : '';
+  return [prefix, ...datePath(input.startedAt), `${encodeURIComponent(input.id)}${suffix}.${audioExtension(input.mimeType)}`]
     .filter(Boolean)
     .join('/');
 }

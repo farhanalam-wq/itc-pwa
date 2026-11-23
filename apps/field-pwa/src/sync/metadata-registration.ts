@@ -46,12 +46,28 @@ function visitRequest(recording: LocalRecording) {
 }
 
 function recordingRequest(recording: LocalRecording) {
+  const denoisedState = recording.denoisedAudioState ?? 'failed';
+  const denoisedReady = denoisedState === 'ready'
+    && Boolean(recording.denoisedAudioMimeType)
+    && Number(recording.denoisedAudioByteLength) > 0;
   return {
     id: recording.id,
     startedAt: recording.startedAt,
     durationSeconds: recording.durationSeconds,
     mimeType: recording.mimeType,
-    byteLength: recording.byteLength
+    byteLength: recording.byteLength,
+    denoisedAnalysisAudio: {
+      state: denoisedReady ? 'ready' as const : denoisedState === 'unsupported' || denoisedState === 'incomplete' ? denoisedState : 'failed' as const,
+      ...(denoisedReady ? {
+        mimeType: recording.denoisedAudioMimeType,
+        byteLength: recording.denoisedAudioByteLength,
+        sampleRateHz: 48_000,
+        durationSeconds: recording.durationSeconds,
+        model: 'DeepFilterNet3',
+        modelVersion: '@workadventure/noise-suppression@0.2.0'
+      } : {}),
+      ...(!denoisedReady ? { errorCode: recording.denoisedAudioErrorCode ?? 'denoised_audio_unavailable' } : {})
+    }
   };
 }
 

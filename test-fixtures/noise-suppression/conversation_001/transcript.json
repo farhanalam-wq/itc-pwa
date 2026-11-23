@@ -1,0 +1,318 @@
+{
+  "synthetic": true,
+  "language_mix": [
+    "Bengali",
+    "Hindi",
+    "English"
+  ],
+  "turns": [
+    {
+      "turn": 0,
+      "speaker": "salesperson",
+      "language_code": "bn-IN",
+      "text": "নমস্কার দাদা, मैं ITC से आया हूँ। আজ Sunfeast Dark Fantasy নিয়ে একটু কথা বলতে চাচ্ছিলাম। আপনার দোকানে premium biscuits-এর customer response কেমন?",
+      "voice_id": "aditya_hi_sales",
+      "pace": 1.03,
+      "preceding_pause_ms": 0,
+      "start_sec": 0.0,
+      "end_sec": 9.485
+    },
+    {
+      "turn": 1,
+      "speaker": "shopkeeper",
+      "language_code": "bn-IN",
+      "text": "আরে, আসুন। Response আছে, but रोज़ नहीं। এখানে mostly ছোট biscuits packs চলে। Premium কিছু রাখলে অনেক সময় shelf-এ পড়ে থাকে।",
+      "voice_id": "arnab_bn_conversation",
+      "pace": 0.98,
+      "preceding_pause_ms": 182,
+      "start_sec": 9.667,
+      "end_sec": 21.494
+    },
+    {
+      "turn": 2,
+      "speaker": "salesperson",
+      "language_code": "hi-IN",
+      "text": "हाँ, समझ गया। একটু detail-এ বলবেন? कौन-सा price range सबसे ज्यादा चलता है, और किस time customers ज़्यादा आते हैं?",
+      "voice_id": "aditya_hi_sales",
+      "pace": 1.0,
+      "preceding_pause_ms": 295,
+      "start_sec": 21.789,
+      "end_sec": 27.949
+    },
+    {
+      "turn": 3,
+      "speaker": "shopkeeper",
+      "language_code": "bn-IN",
+      "text": "দেখুন, दस-बीस रुपये वाले packets जल्दी निकल जाते हैं। School ছুটির পরে আর evening-এ crowd বেশি হয়। বড় pack তুলতে लोग सोचते हैं।",
+      "voice_id": "arnab_bn_conversation",
+      "pace": 0.98,
+      "preceding_pause_ms": 222,
+      "start_sec": 28.171,
+      "end_sec": 37.552
+    },
+    {
+      "turn": 4,
+      "speaker": "salesperson",
+      "language_code": "bn-IN",
+      "text": "আচ্ছা, তাহলে price-sensitive customers বেশি। लेकिन premium taste চাইলে लोग कुछ अलग पूछते हैं क्या? Sunfeast Dark Fantasy-এর মতো product নিয়ে enquiry হয়?",
+      "voice_id": "aditya_hi_sales",
+      "pace": 1.03,
+      "preceding_pause_ms": 214,
+      "start_sec": 37.766,
+      "end_sec": 46.93
+    },
+    {
+      "turn": 5,
+      "speaker": "shopkeeper",
+      "language_code": "hi-IN",
+      "text": "कभी-कभी पूछते हैं। एक-दो customers ने नाम लिया था, but регуляр demand বলা যাবে না। আর जो available है, वही ले जाते हैं।",
+      "voice_id": "arnab_bn_conversation",
+      "pace": 0.92,
+      "preceding_pause_ms": 186,
+      "start_sec": 47.116,
+      "end_sec": 55.449
+    },
+    {
+      "turn": 6,
+      "speaker": "salesperson",
+      "language_code": "bn-IN",
+      "text": "হুম, interesting। যারা জিজ্ঞেস করেছিলেন, वो students थे या office-going customers? আমি বুঝতে চাই কোন segment-এ product fit করতে পারে।",
+      "voice_id": "aditya_hi_sales",
+      "pace": 1.0,
+      "preceding_pause_ms": 281,
+      "start_sec": 55.73,
+      "end_sec": 65.41
+    },
+    {
+      "turn": 7,
+      "speaker": "shopkeeper",
+      "language_code": "bn-IN",
+      "text": "একজন college-এর ছেলে ছিল, আর একজন शाम को office से लौट रहा था। কিন্তু সেটা দেখে regular demand assume করা ঠিক হবে না।",
+      "voice_id": "arnab_bn_conversation",
+      "pace": 0.97,
+      "preceding_pause_ms": 183,
+      "start_sec": 65.593,
+      "end_sec": 76.227
+    },
+    {
+      "turn": 8,
+      "speaker": "salesperson",
+      "language_code": "hi-IN",
+      "text": "बिल्कुल, दो enquiries से conclusion नहीं निकालेंगे। वैसे आपके पास premium biscuits का अभी कितना shelf space है? একটু দেখাতে পারবেন?",
+      "voice_id": "aditya_hi_sales",
+      "pace": 0.99,
+      "preceding_pause_ms": 384,
+      "start_sec": 76.611,
+      "end_sec": 84.266
+    },
+    {
+      "turn": 9,
+      "speaker": "shopkeeper",
+      "language_code": "bn-IN",
+      "text": "এই সামনের একটা ছোট rack আছে। उसमें already दूसरे brands रखे हैं। New item रखने का मतलब किसी पुराने packet को पीछे करना पड़ेगा।",
+      "voice_id": "arnab_bn_conversation",
+      "pace": 0.99,
+      "preceding_pause_ms": 312,
+      "start_sec": 84.578,
+      "end_sec": 95.069
+    },
+    {
+      "turn": 10,
+      "speaker": "salesperson",
+      "language_code": "bn-IN",
+      "text": "ঠিক বলছেন। Existing product সরানোর জন্য বলছি না। अगर छोटा trial हो, तो দুটো packs counter-এর কাছে রাখা সম্ভব হবে?",
+      "voice_id": "aditya_hi_sales",
+      "pace": 1.04,
+      "preceding_pause_ms": 173,
+      "start_sec": 95.242,
+      "end_sec": 103.09
+    },
+    {
+      "turn": 11,
+      "speaker": "shopkeeper",
+      "language_code": "hi-IN",
+      "text": "देखिए, दो packs रखना मुश्किल नहीं। लेकिन मेरा पैसा stock में अटकना नहीं चाहिए। আর margin clear না হলে order लेना risky है।",
+      "voice_id": "arnab_bn_conversation",
+      "pace": 0.98,
+      "preceding_pause_ms": 251,
+      "start_sec": 103.341,
+      "end_sec": 113.785
+    },
+    {
+      "turn": 12,
+      "speaker": "salesperson",
+      "language_code": "hi-IN",
+      "text": "Fair point दादा। Margin और current rate मैं distributor से verify करके ही बताऊँगा। अभी कोई percentage बोलकर आपको confuse नहीं करना चाहता।",
+      "voice_id": "aditya_hi_sales",
+      "pace": 1.0,
+      "preceding_pause_ms": 344,
+      "start_sec": 114.129,
+      "end_sec": 121.409
+    },
+    {
+      "turn": 13,
+      "speaker": "shopkeeper",
+      "language_code": "bn-IN",
+      "text": "আর expiry date? पिछली बार दूसरे product में बहुत कम shelf life बची थी। তারপর customer ফেরত দিতে এসেছিল, बहुत झंझट हुआ।",
+      "voice_id": "arnab_bn_conversation",
+      "pace": 1.0,
+      "preceding_pause_ms": 280,
+      "start_sec": 121.689,
+      "end_sec": 132.009
+    },
+    {
+      "turn": 14,
+      "speaker": "salesperson",
+      "language_code": "bn-IN",
+      "text": "বুঝলাম, সেটা genuinely problem। আমরা supplied batch-এর date पहले check करेंगे। Stock হাতে না দেখে expiry নিয়ে promise করব না।",
+      "voice_id": "aditya_hi_sales",
+      "pace": 0.98,
+      "preceding_pause_ms": 342,
+      "start_sec": 132.351,
+      "end_sec": 139.686
+    },
+    {
+      "turn": 15,
+      "speaker": "shopkeeper",
+      "language_code": "hi-IN",
+      "text": "ठीक है। और अगर product नहीं चला तो क्या return हो सकता है? पूछ रहा हूँ क्योंकि पहले कुछ लोगों ने बाद में मना कर दिया था।",
+      "voice_id": "arnab_bn_conversation",
+      "pace": 0.92,
+      "preceding_pause_ms": 364,
+      "start_sec": 140.05,
+      "end_sec": 150.548
+    },
+    {
+      "turn": 16,
+      "speaker": "salesperson",
+      "language_code": "hi-IN",
+      "text": "मैं return policy बिना confirm किए guarantee नहीं दूँगा। Distributor से terms पूछकर बताऊँगा। আপাতত smallest practical trial quantity-তেই থাকি।",
+      "voice_id": "aditya_hi_sales",
+      "pace": 1.03,
+      "preceding_pause_ms": 346,
+      "start_sec": 150.894,
+      "end_sec": 158.902
+    },
+    {
+      "turn": 17,
+      "speaker": "shopkeeper",
+      "language_code": "bn-IN",
+      "text": "হ্যাঁ, সেটা better। वैसे এখানকার customer mostly familiar brands নেয়। अगर नया pack counter पर दिखे, तो पहले पूछेगा ये क्या है।",
+      "voice_id": "arnab_bn_conversation",
+      "pace": 0.98,
+      "preceding_pause_ms": 192,
+      "start_sec": 159.094,
+      "end_sec": 167.086
+    },
+    {
+      "turn": 18,
+      "speaker": "salesperson",
+      "language_code": "bn-IN",
+      "text": "তাই তো। তখন simply বলবেন এটা Sunfeast Dark Fantasy, ITC-এর একটা premium offering। No need to oversell. Customer interested হলে feedbackটা note করবেন?",
+      "voice_id": "aditya_hi_sales",
+      "pace": 1.06,
+      "preceding_pause_ms": 233,
+      "start_sec": 167.319,
+      "end_sec": 175.53
+    },
+    {
+      "turn": 19,
+      "speaker": "shopkeeper",
+      "language_code": "hi-IN",
+      "text": "Feedback note कर लूँगा, but हर customer का detail नहीं मिलेगा। कोई price पूछकर चला गया, সেটা sale नहीं मानेंगे, समझे?",
+      "voice_id": "arnab_bn_conversation",
+      "pace": 0.92,
+      "preceding_pause_ms": 363,
+      "start_sec": 175.893,
+      "end_sec": 184.227
+    },
+    {
+      "turn": 20,
+      "speaker": "salesperson",
+      "language_code": "hi-IN",
+      "text": "हाँ, बिल्कुल। Enquiry अलग, actual sale अलग। Next visit-এ हम देखेंगे कितने packs बिके, क्या objection आया, और repeat demand हुई कि नहीं।",
+      "voice_id": "aditya_hi_sales",
+      "pace": 1.05,
+      "preceding_pause_ms": 320,
+      "start_sec": 184.547,
+      "end_sec": 191.616
+    },
+    {
+      "turn": 21,
+      "speaker": "shopkeeper",
+      "language_code": "bn-IN",
+      "text": "আর delivery की reliability भी देखना होगा। पिछले महीने एक supplier बोला था कल आएगा, फिर तीन दिन तक कोई खबर नहीं।",
+      "voice_id": "arnab_bn_conversation",
+      "pace": 0.97,
+      "preceding_pause_ms": 355,
+      "start_sec": 191.971,
+      "end_sec": 202.601
+    },
+    {
+      "turn": 22,
+      "speaker": "salesperson",
+      "language_code": "bn-IN",
+      "text": "সেটা noted। मैं availability और delivery schedule confirm करके update दूँगा। अभी exact date बोलना सही नहीं होगा। আপনার regular restocking day কোনটা?",
+      "voice_id": "aditya_hi_sales",
+      "pace": 0.98,
+      "preceding_pause_ms": 205,
+      "start_sec": 202.806,
+      "end_sec": 210.875
+    },
+    {
+      "turn": 23,
+      "speaker": "shopkeeper",
+      "language_code": "bn-IN",
+      "text": "সাধারণত Tuesday আর Friday stock আসে। लेकिन अगर rate और expiry ठीक থাকে, तो দুটো packs-এর trial করা যেতে পারে।",
+      "voice_id": "arnab_bn_conversation",
+      "pace": 0.98,
+      "preceding_pause_ms": 286,
+      "start_sec": 211.161,
+      "end_sec": 221.352
+    },
+    {
+      "turn": 24,
+      "speaker": "salesperson",
+      "language_code": "hi-IN",
+      "text": "Great, তাহলে আমরা two-pack trial note করছি, subject to rate আর batch check। क्या अगले visit में आप बता पाएँगे किस तरह के customers ने पूछा?",
+      "voice_id": "aditya_hi_sales",
+      "pace": 1.05,
+      "preceding_pause_ms": 210,
+      "start_sec": 221.562,
+      "end_sec": 228.96
+    },
+    {
+      "turn": 25,
+      "speaker": "shopkeeper",
+      "language_code": "bn-IN",
+      "text": "হ্যাঁ, মোটামুটি বলতে পারব। College crowd, office crowd, নাকি family buyers—যা মনে থাকবে বলব। लेकिन कोई fake number नहीं दूँगा।",
+      "voice_id": "arnab_bn_conversation",
+      "pace": 0.95,
+      "preceding_pause_ms": 221,
+      "start_sec": 229.181,
+      "end_sec": 242.562
+    },
+    {
+      "turn": 26,
+      "speaker": "salesperson",
+      "language_code": "hi-IN",
+      "text": "बिल्कुल सही। तो summary ये है: premium demand limited, low-price packs fast-moving, shelf space tight, और two packs का cautious trial. আমি terms verify করে আসব।",
+      "voice_id": "aditya_hi_sales",
+      "pace": 1.03,
+      "preceding_pause_ms": 402,
+      "start_sec": 242.964,
+      "end_sec": 253.223
+    },
+    {
+      "turn": 27,
+      "speaker": "shopkeeper",
+      "language_code": "bn-IN",
+      "text": "ঠিক আছে ভাই। আগে rate, expiry আর delivery confirm করুন। তারপর দুটো packs রাখব, और actual sales देखकर ही next order decide करेंगे।",
+      "voice_id": "arnab_bn_conversation",
+      "pace": 0.93,
+      "preceding_pause_ms": 356,
+      "start_sec": 253.579,
+      "end_sec": 264.749
+    }
+  ]
+}

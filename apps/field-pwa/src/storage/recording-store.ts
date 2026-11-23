@@ -10,6 +10,7 @@ import {
 } from './indexed-db';
 import {
   audioFileName,
+  denoisedAudioFileName,
   fileExists,
   getAudioFile,
   getRecordingDirectory,
@@ -73,6 +74,72 @@ function fileWriteChunk(chunk: Blob | ArrayBuffer | ArrayBufferView): Blob | Arr
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+export class DenoisedAudioWriter {
+  private writeChain: Promise<void> = Promise.resolve();
+  private closed = false;
+
+  constructor(
+    readonly recordingId: string,
+    readonly fileName: string,
+    readonly mimeType: string,
+    private readonly fileHandle: FileSystemFileHandle,
+    private readonly onFinalize: (id: string, fileName: string, mimeType: string) => Promise<LocalRecording>,
+    private readonly onDiscard: (
+      id: string,
+      fileName: string,
+      reason: string,
+      state?: 'failed' | 'incomplete' | 'unsupported',
+      errorCode?: string
+    ) => Promise<void>
+  ) {}
+
+  append(chunk: Blob): Promise<void> {
+    if (this.closed) return Promise.reject(new Error('The denoised audio writer is already closed.'));
+    if (chunk.size === 0) return this.writeChain;
+    this.writeChain = this.writeChain.then(async () => {
+      const existingFile = await this.fileHandle.getFile();
+      const writable = await this.fileHandle.createWritable({ keepExistingData: true });
+      try {
+        await writable.seek(existingFile.size);
+        await writable.write(chunk);
+        await writable.close();
+      } catch (error) {
+        await writable.abort().catch(() => undefined);
+        throw error;
+      }
+    });
+    return this.writeChain;
+  }
+
+  async finalize(): Promise<LocalRecording> {
+    if (this.closed) throw new Error('The denoised audio writer is already closed.');
+    this.closed = true;
+    try {
+      await this.writeChain;
+      if ((await this.fileHandle.getFile()).size === 0) throw new Error('The denoised analysis recording is empty.');
+      return await this.onFinalize(this.recordingId, this.fileName, this.mimeType);
+    } catch (error) {
+      await this.onDiscard(
+        this.recordingId,
+        this.fileName,
+        error instanceof Error ? error.message : 'The denoised analysis recording could not be finalized.'
+      ).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async discard(
+    reason: string,
+    state: 'failed' | 'incomplete' | 'unsupported' = 'failed',
+    errorCode = 'sidecar_capture_failed'
+  ): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    await this.writeChain.catch(() => undefined);
+    await this.onDiscard(this.recordingId, this.fileName, reason, state, errorCode);
+  }
 }
 
 export class RecordingWriter {
@@ -147,6 +214,7 @@ export class RecordingStore {
       byteLength: 0,
       syncState: 'queued',
       analysisState: 'not_started',
+      denoisedAudioState: 'not_started',
       fileName,
       localState: 'recording',
       metadataRegistrationState: 'not_ready',
@@ -180,6 +248,10 @@ export class RecordingStore {
 
     return new RecordingWriter(recording, fileHandle, async (recordingId, durationSeconds) => {
       const file = await fileHandle.getFile();
+      const current = await getLocalRecording(recordingId);
+      if (current?.denoisedAudioState === 'processing' && current.denoisedAudioFileName) {
+        await removeAudioFile(current.denoisedAudioFileName).catch(() => undefined);
+      }
       return updateLocalRecording(recordingId, (current) => ({
         ...current,
         durationSeconds,
@@ -189,12 +261,137 @@ export class RecordingStore {
         metadataRegistrationError: undefined,
         syncState: 'queued',
         analysisState: 'not_started',
+        denoisedAudioState: current.denoisedAudioState === 'processing' ? 'incomplete' : current.denoisedAudioState,
+        denoisedAudioFileName: current.denoisedAudioState === 'processing' ? undefined : current.denoisedAudioFileName,
+        denoisedAudioMimeType: current.denoisedAudioState === 'processing' ? undefined : current.denoisedAudioMimeType,
+        denoisedAudioByteLength: current.denoisedAudioState === 'processing' ? undefined : current.denoisedAudioByteLength,
+        denoisedAudioError: current.denoisedAudioState === 'processing' ? 'Denoised audio capture did not finalize with the original recording.' : current.denoisedAudioError,
+        denoisedAudioErrorCode: current.denoisedAudioState === 'processing' ? 'denoised_capture_incomplete' : current.denoisedAudioErrorCode,
         completedAt: nowIso(),
         updatedAt: nowIso(),
         incompleteReason: undefined,
         lastSyncError: undefined
       }));
     });
+  }
+
+  async createDenoisedAudioWriter(id: string, mimeType: string): Promise<DenoisedAudioWriter> {
+    const recording = await getLocalRecording(id);
+    if (!recording || recording.localState !== 'recording') {
+      throw new Error('Denoised audio can only be added while its original recording is active.');
+    }
+    const fileName = denoisedAudioFileName(id, mimeType);
+    if (await fileExists(fileName)) throw new Error('A denoised audio file already exists for this recording.');
+    const directory = await getRecordingDirectory();
+    await updateLocalRecording(id, (current) => ({
+      ...current,
+      denoisedAudioState: 'processing',
+      denoisedAudioFileName: fileName,
+      denoisedAudioMimeType: mimeType,
+      denoisedAudioByteLength: 0,
+      denoisedAudioError: undefined,
+      updatedAt: nowIso()
+    }));
+    const fileHandle = await directory.getFileHandle(fileName, { create: true });
+    return new DenoisedAudioWriter(
+      id,
+      fileName,
+      mimeType,
+      fileHandle,
+      async (recordingId, audioFileName, audioMimeType) => {
+        const file = await fileHandle.getFile();
+        if (!file.size) throw new Error('The denoised analysis recording is empty.');
+        return updateLocalRecording(recordingId, (current) => ({
+          ...current,
+          denoisedAudioState: 'ready',
+          denoisedAudioFileName: audioFileName,
+          denoisedAudioMimeType: audioMimeType,
+          denoisedAudioByteLength: file.size,
+          denoisedAudioSyncState: 'queued',
+          denoisedAudioRetryable: undefined,
+          denoisedAudioError: undefined,
+          denoisedAudioErrorCode: undefined,
+          updatedAt: nowIso()
+        }));
+      },
+      async (recordingId, audioFileName, reason, state = 'failed', errorCode = 'sidecar_finalize_failed') => {
+        await removeAudioFile(audioFileName).catch((error) => {
+          if (!(error instanceof DOMException && error.name === 'NotFoundError')) throw error;
+        });
+        await updateLocalRecording(recordingId, (current) => ({
+          ...current,
+          denoisedAudioState: state,
+          denoisedAudioFileName: undefined,
+          denoisedAudioMimeType: undefined,
+          denoisedAudioByteLength: undefined,
+          denoisedAudioSyncState: undefined,
+          denoisedAudioRetryable: undefined,
+          denoisedAudioError: reason,
+          denoisedAudioErrorCode: errorCode,
+          updatedAt: nowIso()
+        }));
+      }
+    );
+  }
+
+  async markDenoisedAudioUnavailable(
+    id: string,
+    reason: string,
+    state: 'failed' | 'unsupported' | 'incomplete' = 'failed',
+    errorCode = 'denoiser_unavailable'
+  ): Promise<LocalRecording> {
+    const existing = await getLocalRecording(id);
+    if (existing?.denoisedAudioFileName) {
+      await removeAudioFile(existing.denoisedAudioFileName).catch((error) => {
+        if (!(error instanceof DOMException && error.name === 'NotFoundError')) throw error;
+      });
+    }
+    return updateLocalRecording(id, (recording) => ({
+      ...recording,
+      denoisedAudioState: state,
+      denoisedAudioFileName: undefined,
+      denoisedAudioMimeType: undefined,
+      denoisedAudioByteLength: undefined,
+      denoisedAudioSyncState: undefined,
+      denoisedAudioRetryable: undefined,
+      denoisedAudioError: reason,
+      denoisedAudioErrorCode: errorCode,
+      updatedAt: nowIso()
+    }));
+  }
+
+  async setDenoisedAudioSyncState(
+    id: string,
+    syncState: SyncState,
+    options: { objectKey?: string; error?: string; retryable?: boolean } = {}
+  ): Promise<LocalRecording> {
+    return updateLocalRecording(id, (recording) => {
+      if (recording.localState !== 'ready' || recording.denoisedAudioState !== 'ready') {
+        throw new Error('Only finalized denoised analysis audio can enter the upload state machine.');
+      }
+      return {
+        ...recording,
+        denoisedAudioSyncState: syncState,
+        denoisedAudioRetryable: syncState === 'error' ? options.retryable ?? true : undefined,
+        denoisedAudioError: syncState === 'error' ? options.error ?? 'Denoised analysis audio upload failed.' : recording.denoisedAudioError,
+        ...(recording.denoisedAnalysisAudio ? {
+          denoisedAnalysisAudio: {
+            ...recording.denoisedAnalysisAudio,
+            syncState,
+            ...(options.objectKey ? { objectKey: options.objectKey } : {})
+          }
+        } : {}),
+        updatedAt: nowIso()
+      };
+    });
+  }
+
+  async readDenoisedAudio(id: string): Promise<File> {
+    const recording = await getLocalRecording(id);
+    if (!recording || recording.denoisedAudioState !== 'ready' || !recording.denoisedAudioFileName) {
+      throw new Error('A complete denoised analysis recording is not available.');
+    }
+    return getAudioFile(recording.denoisedAudioFileName);
   }
 
   get(id: string): Promise<LocalRecording | undefined> {
@@ -211,7 +408,10 @@ export class RecordingStore {
     return records
       .filter((record) => record.localState === 'ready'
         && (record.syncState === 'queued' || record.syncState === 'uploading'
-          || (record.syncState === 'error' && record.uploadRetryable !== false)))
+          || (record.syncState === 'error' && record.uploadRetryable !== false)
+          || (record.denoisedAudioState === 'ready'
+            && record.denoisedAudioSyncState !== 'uploaded'
+            && !(record.denoisedAudioSyncState === 'error' && record.denoisedAudioRetryable === false))))
       .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
   }
 
@@ -296,6 +496,8 @@ export class RecordingStore {
       return {
         ...recording,
         syncState: 'queued',
+        denoisedAudioSyncState: recording.denoisedAudioState === 'ready' ? 'queued' : recording.denoisedAudioSyncState,
+        denoisedAudioRetryable: undefined,
         uploadRetryable: undefined,
         lastSyncError: undefined,
         updatedAt: nowIso()
@@ -311,6 +513,11 @@ export class RecordingStore {
     } catch (error) {
       if (!(error instanceof DOMException && error.name === 'NotFoundError')) throw error;
     }
+    if (recording.denoisedAudioFileName) {
+      await removeAudioFile(recording.denoisedAudioFileName).catch((error) => {
+        if (!(error instanceof DOMException && error.name === 'NotFoundError')) throw error;
+      });
+    }
     await deleteLocalRecording(id);
   }
 
@@ -321,6 +528,10 @@ export class RecordingStore {
     }
     const file = await getAudioFile(recording.fileName);
     if (file.size === 0) throw new Error('The incomplete recording has no saved audio to finalize.');
+    const interruptedDenoisedCapture = recording.denoisedAudioState === 'processing' || recording.denoisedAudioState === 'ready';
+    if (interruptedDenoisedCapture && recording.denoisedAudioFileName) {
+      await removeAudioFile(recording.denoisedAudioFileName).catch(() => undefined);
+    }
     return updateLocalRecording(id, (current) => ({
       ...current,
       durationSeconds: Math.max(0, durationSeconds),
@@ -330,6 +541,12 @@ export class RecordingStore {
       metadataRegistrationError: undefined,
       syncState: 'queued',
       analysisState: 'not_started',
+      denoisedAudioState: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? 'incomplete' : current.denoisedAudioState,
+      denoisedAudioFileName: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? undefined : current.denoisedAudioFileName,
+      denoisedAudioMimeType: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? undefined : current.denoisedAudioMimeType,
+      denoisedAudioByteLength: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? undefined : current.denoisedAudioByteLength,
+      denoisedAudioError: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? 'Denoised sidecar was interrupted with the original capture.' : current.denoisedAudioError,
+      denoisedAudioErrorCode: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? 'denoised_capture_interrupted' : current.denoisedAudioErrorCode,
       completedAt: nowIso(),
       incompleteReason: undefined,
       lastSyncError: undefined,
@@ -342,11 +559,21 @@ export class RecordingStore {
     const items: RecoveryItem[] = [];
 
     for (const recording of interrupted) {
+      const interruptedDenoisedCapture = recording.denoisedAudioState === 'processing' || recording.denoisedAudioState === 'ready';
+      if (interruptedDenoisedCapture && recording.denoisedAudioFileName) {
+        await removeAudioFile(recording.denoisedAudioFileName).catch(() => undefined);
+      }
       try {
         if (!(await fileExists(recording.fileName))) {
           await updateLocalRecording(recording.id, (current) => ({
             ...current,
             localState: 'incomplete',
+            denoisedAudioState: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? 'incomplete' : current.denoisedAudioState,
+            denoisedAudioFileName: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? undefined : current.denoisedAudioFileName,
+            denoisedAudioMimeType: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? undefined : current.denoisedAudioMimeType,
+            denoisedAudioByteLength: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? undefined : current.denoisedAudioByteLength,
+            denoisedAudioError: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? 'Denoised sidecar was interrupted with the original capture.' : current.denoisedAudioError,
+            denoisedAudioErrorCode: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? 'denoised_capture_interrupted' : current.denoisedAudioErrorCode,
             syncState: 'error',
             incompleteReason: 'Audio file is missing from local storage.',
             lastSyncError: undefined,
@@ -368,6 +595,12 @@ export class RecordingStore {
         await updateLocalRecording(recording.id, (current) => ({
           ...current,
           localState: 'incomplete',
+          denoisedAudioState: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? 'incomplete' : current.denoisedAudioState,
+          denoisedAudioFileName: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? undefined : current.denoisedAudioFileName,
+          denoisedAudioMimeType: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? undefined : current.denoisedAudioMimeType,
+          denoisedAudioByteLength: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? undefined : current.denoisedAudioByteLength,
+          denoisedAudioError: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? 'Denoised sidecar was interrupted with the original capture.' : current.denoisedAudioError,
+          denoisedAudioErrorCode: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? 'denoised_capture_interrupted' : current.denoisedAudioErrorCode,
           byteLength: file.size,
           syncState: 'error',
           incompleteReason: message,
@@ -379,6 +612,12 @@ export class RecordingStore {
         await updateLocalRecording(recording.id, (current) => ({
           ...current,
           localState: 'incomplete',
+          denoisedAudioState: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? 'incomplete' : current.denoisedAudioState,
+          denoisedAudioFileName: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? undefined : current.denoisedAudioFileName,
+          denoisedAudioMimeType: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? undefined : current.denoisedAudioMimeType,
+          denoisedAudioByteLength: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? undefined : current.denoisedAudioByteLength,
+          denoisedAudioError: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? 'Denoised sidecar was interrupted with the original capture.' : current.denoisedAudioError,
+          denoisedAudioErrorCode: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? 'denoised_capture_interrupted' : current.denoisedAudioErrorCode,
           syncState: 'error',
           incompleteReason: message,
           updatedAt: nowIso()
@@ -405,11 +644,17 @@ export class RecordingStore {
       ? await navigator.storage.persisted()
       : false;
     const fileSizes = await Promise.all(recordings.map(async (recording) => {
+      let originalSize = 0;
+      let denoisedSize = 0;
       try {
-        return (await getAudioFile(recording.fileName)).size;
+        originalSize = (await getAudioFile(recording.fileName)).size;
       } catch {
-        return 0;
+        originalSize = 0;
       }
+      if (recording.denoisedAudioFileName) {
+        try { denoisedSize = (await getAudioFile(recording.denoisedAudioFileName)).size; } catch { denoisedSize = 0; }
+      }
+      return originalSize + denoisedSize;
     }));
     return {
       quota: estimate?.quota,

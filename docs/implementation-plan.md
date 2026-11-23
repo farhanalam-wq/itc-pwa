@@ -1,8 +1,27 @@
 # Implementation plan
 
-## Current baseline and approved next scope — 2026-11-19
+## Active scope update — 2026-11-22
 
-This section records the actual repository state and narrows the next implementation increment. It supersedes the broader proposed insight-extraction work in Phases 5–6 for the immediate deliverable: preserve the current PWA and manager experience, add durable storage and one administrator, transcribe completed recordings, and show those transcripts in the manager. Do not add automated sales insight extraction, new reporting metrics, tenant isolation, or extra account roles in this increment.
+The 2026-11-19 baseline below records the implementation state at that time. Its instruction to defer automated sales insight extraction is superseded for the current user-authorized work. The active scope is now: preserve the original PWA recording; produce and durably upload a separate DeepFilterNet3 analysis artifact; send only that artifact to Pyannote; persist an evidence-grounded sales analysis after diarized transcription; connect real results and truthful empty/status states to the manager; add a Real / Demo / Both overview toggle with separate source totals; clean unrelated stale demo artifacts while retaining the original parsed/demo content; then harden and optimize for the selected deployment target.
+
+### Active phases and gates
+
+| Phase | Deliverable | Gate |
+| --- | --- | --- |
+| 1 — Shared contracts and evaluation | Denoised artifact, transcription, analysis, report, state, and evidence contracts; baseline cases and metrics. | Lead freezes shared types/routes before parallel implementation. |
+| 2 — Field denoising branch | Lazy DeepFilterNet3 prewarm, one existing microphone capture, unchanged original OPFS recording, separate denoised sidecar, adaptive load qualification, telemetry, retryable offline upload. | Record starts immediately; if the full denoised sidecar is unavailable or overloaded, original remains safe and the recording is not sent to Pyannote. |
+| 3 — API artifact and diarization routing | Durable role-specific storage; Pyannote job gating; retries bound to the denoised object key and hash. | Both immediate and startup queue paths require a finalized denoised artifact. Legacy raw-only audio is ineligible for Pyannote. |
+| 4 — Production conversation analysis | OpenAI structured extraction after diarized transcription, with evidence validation, versioning, confidence, explicitness, and conservative order/follow-up parsing. | Every finding cites valid transcript segments; confirmed order counts/value exclude conditional or inferred opportunity. |
+| 5 — Manager integration and metrics | Real capture analysis views and source-filtered aggregates; loading, no-analysis, empty, partial, and error states; Overview source toggle for Real / Demo / Both. | Counts use distinct recording/outlet denominators where applicable and link to evidence. Both keeps source groups and denominators separately labeled. |
+| 6 — Demo data cleanup | Remove unsupported/duplicate demo artifacts while retaining the original parsed/demo content and regression fixtures. | Overview toggle makes real and demo values independently viewable and jointly visible without passing fixtures off as real recordings; no real audio is deleted without an explicit retention decision. |
+| 7 — Integrated quality and reliability | PWA → dual artifacts → Pyannote → OpenAI transcription → OpenAI analysis → manager verification and failure-path checks. | Existing recording integrity holds through denoiser, upload, API, and analysis failures. Real noisy-audio sign-off waits for the user-provided fixture. |
+| 8 — Deployment preparation | Frontend lazy loading, API concurrency/memory limits, offline asset behavior, runbook, and production checks. | Optimize against the user's actual host and RAM budget; those deployment details are not inferred. |
+
+The user is acquiring and mixing the noisy field-audio test fixture. That work is intentionally outside the agent boundary; its path and reference annotations become an input to Phase 7 when provided.
+
+## Historical baseline and previous next scope — 2026-11-19
+
+This section records the repository state and narrower scope at that time. The active scope update above supersedes its temporary deferral of automated sales insight extraction and new reporting metrics. The previously completed storage, administrator, transcription, and transcript-display work remains the baseline to preserve.
 
 ### Desired vertical slice
 

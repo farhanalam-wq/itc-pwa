@@ -31,10 +31,24 @@ function visitMatches(existing: VisitRecord, input: CreateVisitInput): boolean {
 }
 
 function recordingMatches(existing: RecordingMetadata, input: CreateRecordingInput): boolean {
+  const existingAudio = existing.denoisedAnalysisAudio;
+  const incomingAudio = input.denoisedAnalysisAudio;
+  const inputAudioMatches = !existingAudio && !incomingAudio
+    || Boolean(existingAudio && incomingAudio
+      && existingAudio.state === incomingAudio.state
+      && existingAudio.mimeType === incomingAudio.mimeType
+      && existingAudio.byteLength === incomingAudio.byteLength
+      && (incomingAudio.sha256 === undefined || existingAudio.sha256 === incomingAudio.sha256)
+      && existingAudio.sampleRateHz === incomingAudio.sampleRateHz
+      && existingAudio.durationSeconds === incomingAudio.durationSeconds
+      && existingAudio.model === incomingAudio.model
+      && existingAudio.modelVersion === incomingAudio.modelVersion
+      && existingAudio.errorCode === incomingAudio.errorCode);
   return existing.startedAt === input.startedAt
     && existing.durationSeconds === input.durationSeconds
     && existing.mimeType === input.mimeType
-    && existing.byteLength === input.byteLength;
+    && existing.byteLength === input.byteLength
+    && inputAudioMatches;
 }
 
 function visitValue(document: VisitDocument): VisitRecord {
@@ -120,7 +134,14 @@ export class MongoRecordingRepository implements RecordingRepository {
       mimeType: input.mimeType,
       byteLength: input.byteLength,
       syncState: 'queued',
-      analysisState: 'not_started'
+      analysisState: 'not_started',
+      conversationAnalysisState: input.denoisedAnalysisAudio && input.denoisedAnalysisAudio.state !== 'ready' ? 'failed' : 'not_started',
+      ...(input.denoisedAnalysisAudio ? {
+        denoisedAnalysisAudio: {
+          ...input.denoisedAnalysisAudio,
+          syncState: input.denoisedAnalysisAudio.state === 'ready' ? 'queued' as const : 'error' as const
+        }
+      } : {})
     };
 
     try {
@@ -163,10 +184,10 @@ export class MongoRecordingRepository implements RecordingRepository {
     return found?.visitId;
   }
 
-  async getAnalysisStatus(id: string): Promise<Pick<RecordingMetadata, 'id' | 'syncState' | 'analysisState'> | undefined> {
-    const found = await this.recordings.findOne({ id, syncState: 'uploaded' }, { projection: { id: 1, syncState: 1, analysisState: 1 } });
+  async getAnalysisStatus(id: string): Promise<Pick<RecordingMetadata, 'id' | 'syncState' | 'analysisState' | 'conversationAnalysisState'> | undefined> {
+    const found = await this.recordings.findOne({ id, syncState: 'uploaded' }, { projection: { id: 1, syncState: 1, analysisState: 1, conversationAnalysisState: 1 } });
     if (!found) return undefined;
-    return { id: found.id, syncState: found.syncState, analysisState: found.analysisState };
+    return { id: found.id, syncState: found.syncState, analysisState: found.analysisState, conversationAnalysisState: found.conversationAnalysisState };
   }
 
   async listRecordings(filters: RecordingFilters): Promise<RecordingPage> {
@@ -214,9 +235,55 @@ export class MongoRecordingRepository implements RecordingRepository {
     return saved;
   }
 
+  async completeDenoisedAnalysisAudio(id: string, stored: StoredObjectMetadata): Promise<RecordingMetadata | undefined> {
+    const query: Document = {
+      id,
+      syncState: 'uploaded',
+      'denoisedAnalysisAudio.state': 'ready',
+      'denoisedAnalysisAudio.byteLength': stored.byteLength,
+      'denoisedAnalysisAudio.mimeType': stored.mimeType
+    };
+    const existingAudio = await this.recordings.findOne({ id }, { projection: { denoisedAnalysisAudio: 1 } });
+    if (existingAudio?.denoisedAnalysisAudio?.sha256) query['denoisedAnalysisAudio.sha256'] = stored.sha256;
+    const found = await this.recordings.findOne(query);
+    if (!found || !found.denoisedAnalysisAudio) return undefined;
+    const denoisedAnalysisAudio = {
+      ...found.denoisedAnalysisAudio,
+      syncState: 'uploaded' as const,
+      objectKey: stored.objectKey,
+      byteLength: stored.byteLength,
+      mimeType: stored.mimeType,
+      sha256: stored.sha256
+    };
+    const updateQuery: Document = {
+      id,
+      syncState: 'uploaded',
+      'denoisedAnalysisAudio.state': 'ready',
+      'denoisedAnalysisAudio.byteLength': stored.byteLength,
+      'denoisedAnalysisAudio.mimeType': stored.mimeType
+    };
+    if (existingAudio?.denoisedAnalysisAudio?.sha256) updateQuery['denoisedAnalysisAudio.sha256'] = stored.sha256;
+    const updated = await this.recordings.updateOne(updateQuery, { $set: { denoisedAnalysisAudio } });
+    if (updated.matchedCount !== 1) return undefined;
+    const saved = await this.getRecording(id);
+    const savedAudio = saved?.denoisedAnalysisAudio;
+    if (!savedAudio || savedAudio.objectKey !== stored.objectKey || savedAudio.sha256 !== stored.sha256
+      || savedAudio.byteLength !== stored.byteLength || savedAudio.mimeType !== stored.mimeType
+      || savedAudio.syncState !== 'uploaded') return undefined;
+    return saved;
+  }
+
   async findRecordingsWithoutTranscription(limit = 100): Promise<string[]> {
     const missing = await this.recordings.aggregate<{ id: string }>([
-      { $match: { syncState: 'uploaded', objectKey: { $type: 'string' } } },
+      { $match: {
+        syncState: 'uploaded',
+        'denoisedAnalysisAudio.state': 'ready',
+        'denoisedAnalysisAudio.sampleRateHz': 48000,
+        'denoisedAnalysisAudio.durationSeconds': { $gt: 0 },
+        'denoisedAnalysisAudio.syncState': 'uploaded',
+        'denoisedAnalysisAudio.objectKey': { $type: 'string' },
+        'denoisedAnalysisAudio.sha256': { $type: 'string' }
+      } },
       { $lookup: { from: 'transcription_jobs', localField: 'id', foreignField: 'recordingId', as: 'jobs' } },
       { $match: { 'jobs.0': { $exists: false } } },
       { $limit: limit },
@@ -237,6 +304,16 @@ export class MongoRecordingRepository implements RecordingRepository {
       { id, analysisState: { $in: allowedFrom[next] } },
       { $set: { analysisState: next } }
     );
+    return result.modifiedCount === 1;
+  }
+
+  async transitionConversationAnalysisState(
+    id: string,
+    next: RecordingMetadata['conversationAnalysisState'] & string
+  ): Promise<boolean> {
+    const result = await this.recordings.updateOne({ id, syncState: 'uploaded' }, {
+      $set: { conversationAnalysisState: next }
+    });
     return result.modifiedCount === 1;
   }
 }

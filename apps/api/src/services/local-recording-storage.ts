@@ -41,8 +41,8 @@ export class LocalRecordingStorage {
     this.root = resolve(root);
   }
 
-  async save(input: { id: string; startedAt: string; mimeType: string; bytes: Uint8Array }): Promise<string> {
-    const { path, relative } = this.recordingPath(input.id, input.startedAt, input.mimeType);
+  async save(input: { id: string; startedAt: string; mimeType: string; bytes: Uint8Array; artifact?: 'analysis' }): Promise<string> {
+    const { path, relative } = this.recordingPath(input.id, input.startedAt, input.mimeType, input.artifact);
     await mkdir(dirname(path), { recursive: true });
     await Bun.write(path, input.bytes);
     return `local-recordings/${relative}`;
@@ -52,8 +52,8 @@ export class LocalRecordingStorage {
     return `local-recordings/${this.recordingPath(id, startedAt, mimeType).relative}`;
   }
 
-  async removeStaged(id: string, startedAt: string, mimeType: string): Promise<void> {
-    const { path } = this.recordingPath(id, startedAt, mimeType);
+  async removeStaged(id: string, startedAt: string, mimeType: string, artifact?: 'analysis'): Promise<void> {
+    const { path } = this.recordingPath(id, startedAt, mimeType, artifact);
     await rm(path, { force: true });
     await rm(`${path}.chunks`, { recursive: true, force: true });
   }
@@ -66,8 +66,9 @@ export class LocalRecordingStorage {
     total: number;
     expectedByteLength: number;
     bytes: Uint8Array;
+    artifact?: 'analysis';
   }): Promise<{ objectKey: string; complete: boolean }> {
-    return this.withUploadLock(input.id, async () => {
+    return this.withUploadLock(this.lockKey(input.id, input.artifact), async () => {
       if (!Number.isInteger(input.total) || input.total < 1
         || !Number.isInteger(input.index) || input.index < 0 || input.index >= input.total
         || !Number.isInteger(input.expectedByteLength) || input.expectedByteLength < 1) {
@@ -78,7 +79,7 @@ export class LocalRecordingStorage {
         throw new UploadStagingError('The audio chunk size or count does not match the registered recording.', 'upload_invalid');
       }
 
-      const { path, relative } = this.recordingPath(input.id, input.startedAt, input.mimeType);
+      const { path, relative } = this.recordingPath(input.id, input.startedAt, input.mimeType, input.artifact);
       const chunkDir = `${path}.chunks`;
       const manifestPath = join(chunkDir, 'manifest.json');
       await mkdir(chunkDir, { recursive: true });
@@ -129,9 +130,10 @@ export class LocalRecordingStorage {
     startedAt: string;
     mimeType: string;
     expectedByteLength: number;
+    artifact?: 'analysis';
   }): Promise<Uint8Array> {
-    return this.withUploadLock(input.id, async () => {
-      const { path } = this.recordingPath(input.id, input.startedAt, input.mimeType);
+    return this.withUploadLock(this.lockKey(input.id, input.artifact), async () => {
+      const { path } = this.recordingPath(input.id, input.startedAt, input.mimeType, input.artifact);
       const chunkDir = `${path}.chunks`;
       const manifest = await this.readManifest(join(chunkDir, 'manifest.json'));
       const expectedTotal = Math.ceil(input.expectedByteLength / RECORDING_UPLOAD_CHUNK_BYTES);
@@ -192,7 +194,7 @@ export class LocalRecordingStorage {
     }
   }
 
-  private recordingPath(id: string, startedAt: string, mimeType: string) {
+  private recordingPath(id: string, startedAt: string, mimeType: string, artifact?: 'analysis') {
     const date = new Date(startedAt);
     if (Number.isNaN(date.getTime())) throw new UploadStagingError('Recording start time is invalid.', 'upload_invalid');
     const parts = [
@@ -201,7 +203,12 @@ export class LocalRecordingStorage {
       String(date.getUTCDate()).padStart(2, '0')
     ];
     const extension = mimeType.split('/')[1]?.split(';')[0]?.replace(/[^a-z0-9]/gi, '') || 'audio';
-    const relative = [...parts, `${encodeURIComponent(id)}.${extension}`].join('/');
+    const suffix = artifact === 'analysis' ? '.analysis' : '';
+    const relative = [...parts, `${encodeURIComponent(id)}${suffix}.${extension}`].join('/');
     return { relative, path: join(this.root, relative) };
+  }
+
+  private lockKey(id: string, artifact?: 'analysis'): string {
+    return `${id}:${artifact ?? 'original'}`;
   }
 }

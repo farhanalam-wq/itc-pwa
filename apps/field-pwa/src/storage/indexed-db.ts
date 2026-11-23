@@ -1,7 +1,8 @@
-import type { RecordingMetadata } from '@itc/domain';
+import type { DenoisingState, RecordingMetadata, SyncState } from '@itc/domain';
 
 export type LocalRecordingState = 'recording' | 'incomplete' | 'ready';
 export type MetadataRegistrationState = 'not_ready' | 'queued' | 'registering' | 'registered' | 'error';
+export type DenoisedAudioState = DenoisingState;
 
 export interface LocalRecording extends RecordingMetadata {
   visitId: string;
@@ -17,10 +18,18 @@ export interface LocalRecording extends RecordingMetadata {
   uploadRetryable?: boolean;
   lastSyncError?: string;
   incompleteReason?: string;
+  denoisedAudioState?: DenoisedAudioState;
+  denoisedAudioFileName?: string;
+  denoisedAudioByteLength?: number;
+  denoisedAudioMimeType?: string;
+  denoisedAudioError?: string;
+  denoisedAudioErrorCode?: string;
+  denoisedAudioSyncState?: SyncState;
+  denoisedAudioRetryable?: boolean;
 }
 
 const DB_NAME = 'itc-field-source';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const RECORDINGS_STORE = 'recordings';
 
 let databasePromise: Promise<IDBDatabase> | undefined;
@@ -51,7 +60,7 @@ function openDatabase(): Promise<IDBDatabase> {
         store.createIndex('metadataRegistrationState', 'metadataRegistrationState', { unique: false });
       }
 
-      if (event.oldVersion < 2) {
+      if (event.oldVersion < 3) {
         const cursorRequest = store.openCursor();
         cursorRequest.onsuccess = () => {
           const cursor = cursorRequest.result;
@@ -60,7 +69,8 @@ function openDatabase(): Promise<IDBDatabase> {
           cursor.update({
             ...oldRecording,
             visitId: oldRecording.visitId ?? oldRecording.id,
-            metadataRegistrationState: oldRecording.metadataRegistrationState ?? 'not_ready'
+            metadataRegistrationState: oldRecording.metadataRegistrationState ?? 'not_ready',
+            denoisedAudioState: oldRecording.denoisedAudioState ?? 'not_started'
           });
           cursor.continue();
         };

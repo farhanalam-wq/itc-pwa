@@ -15,6 +15,7 @@
     "@itc/api-client": "workspace:*",
     "@itc/domain": "workspace:*",
     "@itc/ui": "workspace:*",
+    "@workadventure/noise-suppression": "0.2.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },
