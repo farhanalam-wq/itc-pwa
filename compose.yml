@@ -25,7 +25,7 @@ services:
       S3_TRANSCRIPT_PREFIX: ${S3_TRANSCRIPT_PREFIX:-field-source/transcripts}
       S3_PRESIGNED_URL_TTL_SECONDS: ${S3_PRESIGNED_URL_TTL_SECONDS:-900}
     ports:
-      - "127.0.0.1:4009:4009"
+      - "0.0.0.0:4009:4009"
     volumes:
       - api-upload-staging:/app/apps/api/var/upload-staging
     read_only: true
@@ -48,7 +48,7 @@ services:
       API_ORIGIN: http://api:4009
       STATIC_ROOT: /app/public
     ports:
-      - "127.0.0.1:4007:3000"
+      - "0.0.0.0:4007:3000"
     read_only: true
     tmpfs:
       - /tmp
@@ -69,7 +69,7 @@ services:
       API_ORIGIN: http://api:4009
       STATIC_ROOT: /app/public
     ports:
-      - "127.0.0.1:4008:3000"
+      - "0.0.0.0:4008:3000"
     read_only: true
     tmpfs:
       - /tmp
