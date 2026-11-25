@@ -164,7 +164,14 @@ export class MongoConversationAnalysisRepository {
   }
 
   async retry(recordingId: string): Promise<RecordingConversationAnalysis | undefined> {
-    const updated = await this.analyses.updateOne({ recordingId, state: 'failed', retryable: true }, {
+    const updated = await this.analyses.updateOne({
+      recordingId,
+      state: 'failed',
+      $or: [
+        { retryable: true },
+        { errorCode: { $in: ['transcript_unavailable', 'transcript_artifact_mismatch'] } }
+      ]
+    }, {
       $set: { state: 'queued', updatedAt: new Date() },
       $unset: { errorCode: '', errorMessage: '', retryable: '', processingStartedAt: '' }
     });

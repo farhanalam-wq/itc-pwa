@@ -26,14 +26,18 @@ export class ConversationAnalysisWorker {
     const recording = await this.getEligibleRecording(recordingId);
     if (recording instanceof Error) throw recording;
     const transcript = await this.transcripts.get(recordingId);
-    if (!transcript || transcript.state !== 'completed' || !transcript.turns?.length) {
-      throw new Error('A completed diarized transcript is required before conversation analysis.');
-    }
-    if (!this.isBoundToCurrentAudio(recording, transcript)) throw new Error('The completed diarized transcript was produced from a different denoised analysis audio artifact.');
     const audio = recording.denoisedAnalysisAudio!;
-    const analysis = await this.analyses.enqueue(recordingId, this.analyzer.model, CONVERSATION_ANALYSIS_VERSION, {
-      objectKey: audio.objectKey!, sha256: audio.sha256!
-    });
+    const eligibleTranscript = transcript?.state === 'completed'
+      && Boolean(transcript.turns?.length)
+      && this.isBoundToCurrentAudio(recording, transcript);
+    const existing = await this.analyses.get(recordingId);
+    const analysis = existing?.state === 'failed'
+      && ['transcript_unavailable', 'transcript_artifact_mismatch'].includes(existing.errorCode ?? '')
+      && eligibleTranscript
+      ? await this.analyses.retry(recordingId) ?? existing
+      : await this.analyses.enqueue(recordingId, this.analyzer.model, CONVERSATION_ANALYSIS_VERSION, {
+        objectKey: audio.objectKey!, sha256: audio.sha256!
+      });
     await this.recordings.transitionConversationAnalysisState(recordingId, analysis.state);
     return analysis;
   }

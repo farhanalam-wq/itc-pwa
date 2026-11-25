@@ -458,8 +458,12 @@ export function createApp(
     if (!transcriptionWorker) return;
     const result = await transcriptionWorker.runNext(recordingId);
     if (result.state !== 'completed' || !conversationAnalysisWorker) return;
-    const analysis = await conversationAnalysisWorker.enqueue(recordingId);
-    if (analysis.state === 'queued') await conversationAnalysisWorker.runNext(recordingId);
+    try {
+      const analysis = await conversationAnalysisWorker.enqueue(recordingId);
+      if (analysis.state === 'queued') await conversationAnalysisWorker.runNext(recordingId);
+    } catch (error) {
+      console.error(`Could not queue conversation analysis for recording ${recordingId}:`, error);
+    }
   };
   const scheduleTranscription = async (recordingId: string): Promise<void> => {
     if (!transcriptionWorker || !transcriptionJobs) return;

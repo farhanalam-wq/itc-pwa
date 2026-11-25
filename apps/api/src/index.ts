@@ -61,25 +61,41 @@ async function start(): Promise<void> {
     draining = true;
     try {
       for (const id of await repository.findRecordingsWithoutTranscription()) {
-        await transcriptionWorker.enqueue(id);
+        try {
+          await transcriptionWorker.enqueue(id);
+        } catch (error) {
+          console.error(`Could not queue transcription for recording ${id}:`, error);
+        }
       }
       while (true) {
         const result = await transcriptionWorker.runNext();
         if (result.state === 'not_ready' || result.state === 'busy') break;
         if (result.state === 'completed') {
-          await conversationAnalysisWorker.enqueue(result.job.recordingId);
-          await conversationAnalysisWorker.runNext(result.job.recordingId);
+          try {
+            await conversationAnalysisWorker.enqueue(result.job.recordingId);
+            await conversationAnalysisWorker.runNext(result.job.recordingId);
+          } catch (error) {
+            console.error(`Could not queue or run conversation analysis for recording ${result.job.recordingId}:`, error);
+          }
         }
       }
+    } catch (error) {
+      console.error('Could not drain the transcription queue:', error);
+    }
+    try {
       for (const id of await conversationAnalyses.findTranscriptionsWithoutAnalysis()) {
-        await conversationAnalysisWorker.enqueue(id);
+        try {
+          await conversationAnalysisWorker.enqueue(id);
+        } catch (error) {
+          console.error(`Could not queue conversation analysis for recording ${id}:`, error);
+        }
       }
       while (true) {
         const result = await conversationAnalysisWorker.runNext();
         if (result.state === 'not_ready' || result.state === 'busy') break;
       }
     } catch (error) {
-      console.error('Could not drain the transcription queue:', error);
+      console.error('Could not drain the conversation analysis queue:', error);
     } finally {
       draining = false;
     }
