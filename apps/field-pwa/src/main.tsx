@@ -19,6 +19,7 @@ import {
   type DeepFilterSession,
   type DeepFilterTelemetryEvent
 } from './audio/deepfilter-session';
+import { prepareDenoiserForRecording } from './audio/prepare-recording';
 import { startMetadataRegistrationSync, type MetadataRegistrationSyncController } from './sync/metadata-registration';
 import { uploadPendingAudio, type ChunkUploadProgress } from './sync/audio-upload';
 import './styles.css';
@@ -245,6 +246,7 @@ function FieldApp() {
   const writerRef = useRef<RecordingWriter | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const denoisedCaptureRef = useRef<ActiveDenoisedCapture | null>(null);
+  const startInProgressRef = useRef(false);
   const denoiserSessionRef = useRef<DeepFilterSession | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const startedAtRef = useRef(0);
@@ -268,18 +270,8 @@ function FieldApp() {
   const displayRecords = orderedRecords.filter((record) => record.localState !== 'recording');
   const [hours, minutes, seconds] = formatElapsed(elapsed);
 
-  useEffect(() => {
-    if (screen !== 'capture') {
-      if (recorderState === 'ready') {
-        const session = denoiserSessionRef.current;
-        denoiserSessionRef.current = null;
-        void session?.dispose();
-      }
-      return;
-    }
-    if (denoiserSessionRef.current) return;
-
-    const session = createDeepFilterSession({
+  function createCaptureDenoiser(): DeepFilterSession {
+    return createDeepFilterSession({
       onTelemetry: (event) => {
         logDenoiserTelemetry(event);
         const capture = denoisedCaptureRef.current;
@@ -300,6 +292,20 @@ function FieldApp() {
         if (capture.recorder.state !== 'inactive') capture.recorder.stop();
       }
     });
+  }
+
+  useEffect(() => {
+    if (screen !== 'capture') {
+      if (recorderState === 'ready') {
+        const session = denoiserSessionRef.current;
+        denoiserSessionRef.current = null;
+        void session?.dispose();
+      }
+      return;
+    }
+    if (denoiserSessionRef.current) return;
+
+    const session = createCaptureDenoiser();
     denoiserSessionRef.current = session;
   }, [screen, recorderState]);
 
@@ -666,7 +672,6 @@ function FieldApp() {
         state: 'failed'
       };
       denoisedStateWriteRef.current = recordingStore.markDenoisedAudioUnavailable(recordingId, capture.failure.reason, 'failed', capture.failure.errorCode).catch(() => undefined);
-      if (denoisedCaptureRef.current === capture) denoisedCaptureRef.current = null;
       void session.detach();
       capture.finish();
     }
@@ -683,21 +688,25 @@ function FieldApp() {
       return;
     }
 
-    const denoiserSessionAtTap = denoiserSessionRef.current;
-    const denoiserReadyAtTap = denoiserSessionAtTap?.state === 'ready';
+    if (startInProgressRef.current || recorderState !== 'ready') return;
+    startInProgressRef.current = true;
     setRecorderState('starting');
-    // This is called directly from the Record gesture. It is best-effort and
-    // does not delay the original capture or wait for a pending model load.
-    void denoiserSessionAtTap?.activate();
+    setNotice({ kind: 'info', text: 'Preparing audio cleanup. Recording will start when it is ready.' });
+    let session = denoiserSessionRef.current;
+    if (!session || ['failed', 'overloaded', 'disposed'].includes(session.state)) {
+      void session?.dispose();
+      session = createCaptureDenoiser();
+      denoiserSessionRef.current = session;
+    }
     try {
-      const audioConstraints = denoiserReadyAtTap
-        ? {
-          ...(microphoneId ? { deviceId: { exact: microphoneId } } : {}),
-          echoCancellation: true,
-          noiseSuppression: false,
-          autoGainControl: false
-        }
-        : microphoneId ? { deviceId: { exact: microphoneId } } : true;
+      await prepareDenoiserForRecording(session);
+      if (session !== denoiserSessionRef.current) throw new Error('Audio preparation was cancelled. Tap Start recording to retry.');
+      const audioConstraints = {
+        ...(microphoneId ? { deviceId: { exact: microphoneId } } : {}),
+        echoCancellation: true,
+        noiseSuppression: false,
+        autoGainControl: false
+      };
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: audioConstraints
       });
@@ -764,40 +773,31 @@ function FieldApp() {
           try { recorder.stop(); } catch { /* The recorder may already have stopped with the track. */ }
         }, { once: true });
       }
+      // Attach the processed stream before either recorder starts capturing.
+      startDenoisedCapture(writer.recording.id, stream, mimeType, session);
+      const capture = denoisedCaptureRef.current;
+      if (!capture || capture.failure || capture.recorder.state !== 'recording') {
+        throw new Error(`Audio cleanup could not start (${capture?.failure?.errorCode ?? session.reason ?? 'denoised_capture_start_failed'}). Tap Start recording to retry.`);
+      }
       recorder.start(1000);
       setRecorderState('recording');
-      if (denoiserReadyAtTap
-        && denoiserSessionAtTap === denoiserSessionRef.current
-        && denoiserSessionAtTap?.state === 'ready') {
-        // This branch starts synchronously after the original recorder. Its
-        // sidecar OPFS writer initializes in the background and buffers only
-        // the first bounded recorder chunks while OPFS opens.
-        startDenoisedCapture(writer.recording.id, stream, mimeType, denoiserSessionAtTap);
-      } else {
-        const reason = denoiserSessionAtTap?.reason
-          ?? (denoiserSessionAtTap?.state === 'initializing' ? 'model_not_ready_at_record_tap' : 'denoiser_not_ready_at_record_tap');
-        const state = denoiserFailureState(denoiserSessionAtTap?.reason);
-        denoisedStateWriteRef.current = recordingStore.markDenoisedAudioUnavailable(
-          writer.recording.id,
-          reason,
-          denoiserSessionAtTap?.reason ? state : 'failed',
-          denoiserSessionAtTap?.reason ?? 'denoiser_not_ready_at_record_tap'
-        ).catch(() => undefined);
-        setNotice({
-          kind: 'info',
-          text: 'The original recording is active, but DeepFilterNet was not ready when recording started. Pyannote will not receive the original audio for this recording.'
-        });
-      }
+      setNotice(null);
       void startMeter(stream);
       if (!isPersistent) void recordingStore.requestDurability().then((value) => setIsPersistent(value)).catch(() => undefined);
       await refreshLocalState();
     } catch (error) {
       const failedCapture = denoisedCaptureRef.current;
-      if (failedCapture && failedCapture.recorder.state !== 'inactive') {
+      if (failedCapture) {
         failedCapture.failure = { reason: 'Original recording startup failed.', errorCode: 'raw_recording_start_failed', state: 'failed' };
-        failedCapture.recorder.stop();
+        if (failedCapture.recorder.state !== 'inactive') failedCapture.recorder.stop();
         await failedCapture.done;
+        await failedCapture.writerReady;
       }
+      await session.dispose();
+      if (denoiserSessionRef.current === session) denoiserSessionRef.current = null;
+      denoisedCaptureRef.current = null;
+      recorderRef.current = null;
+      await denoisedStateWriteRef.current?.catch(() => undefined);
       streamRef.current?.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
       const writer = writerRef.current;
@@ -815,6 +815,8 @@ function FieldApp() {
           ? 'The selected microphone is unavailable. Reconnect it or choose System default.'
           : message });
       await refreshLocalState();
+    } finally {
+      startInProgressRef.current = false;
     }
   }
 
@@ -1000,7 +1002,7 @@ function FieldApp() {
         </section>
 
         <section className={`recorder-panel ${recorderState === 'recording' ? 'is-recording' : ''} ${recorderState === 'paused' ? 'is-paused' : ''}`} aria-label="Recording controls">
-          <div className="recorder-head"><span className={`recorder-state state-${recorderState}`} role="status"><i/>{recorderState === 'starting' ? 'Starting' : recorderState === 'recording' ? 'Recording' : recorderState === 'paused' ? 'Paused' : recorderState === 'stopping' ? 'Saving' : 'Ready'}</span></div>
+          <div className="recorder-head"><span className={`recorder-state state-${recorderState}`} role="status"><i/>{recorderState === 'starting' ? 'Preparing audio' : recorderState === 'recording' ? 'Recording' : recorderState === 'paused' ? 'Paused' : recorderState === 'stopping' ? 'Saving' : 'Ready'}</span></div>
           <div className="timer" aria-label={`Elapsed time ${hours}:${minutes}:${seconds}`}><span className="timer-tile">{hours}</span><span className="timer-separator">:</span><span className="timer-tile">{minutes}</span><span className="timer-separator">:</span><span className="timer-tile">{seconds}</span></div>
           {(recorderState === 'recording' || recorderState === 'paused') && elapsed >= FIELD_CAPTURE_WARNING_SECONDS && <p className="capture-limit-warning" role="status">Transcription supports up to 10 minutes. Recording will stop at 9:50 to leave a safety margin.</p>}
           <div className="level-meter" aria-label={recorderState === 'recording' ? 'Microphone audio level' : 'Audio level meter'}>
@@ -1017,7 +1019,7 @@ function FieldApp() {
             <>
               {recorderState === 'ready' && <p className="recording-consent" id="recording-consent">Get permission before recording. By tapping Start, you confirm everyone agreed.</p>}
               <button className="start-button" type="button" onClick={() => { void handleStart(); }} disabled={!canStart} aria-describedby={recorderState === 'ready' ? 'recording-consent' : undefined}>
-                <Icon name="mic"/>{recorderState === 'starting' ? 'Opening microphone…' : recorderState === 'stopping' ? 'Saving…' : 'Start recording'}
+                <Icon name="mic"/>{recorderState === 'starting' ? 'Preparing audio…' : recorderState === 'stopping' ? 'Saving…' : 'Start recording'}
               </button>
             </>
           )}

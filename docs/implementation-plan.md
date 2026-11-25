@@ -1,5 +1,12 @@
 # Implementation plan
 
+## Recording startup coordination — implemented
+
+The earlier ready-at-tap behavior described in the investigation below has been replaced. The Record gesture resumes the audio context and waits for DeepFilterNet initialization, with a 120-second preparation timeout. No microphone recording starts during preparation. Both recorders start in the same synchronous startup path after processed-stream attachment succeeds; there is no late attachment or silent original-only startup. A preparation failure closes the failed session and allows a fresh retry. Runtime failures after capture begins still retain the original and invalidate incomplete analysis audio. Short completed captures are retained when the performance qualification report is pending. Manager review shows the stored audio-preparation error code and avoids repeating the missing-audio explanation.
+
+Verification: delayed initialization, repeated prepared-session use, failed initialization/resume, hung initialization timeout, existing audio lifecycle and artifact upload tests, workspace typecheck, and production build. Physical microphone/browser capture and live API processing require a running browser and API and remain separate validation steps.
+
+
 ## Recording lifecycle resilience plan — 2026-11-25
 
 ### Repository snapshot and scope

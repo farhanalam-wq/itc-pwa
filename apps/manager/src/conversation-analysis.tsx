@@ -178,6 +178,7 @@ export function ConversationAnalysisPanel({
         ? `Denoised copy ready${denoising.model ? ` · ${denoising.model}${denoising.modelVersion ? ` ${denoising.modelVersion}` : ''}` : ''}.`
         : denoisingLabels[denoising.state]}
     </p>}
+    {denoising?.errorCode && <p className="conversation-analysis-note">Audio preparation reason: {denoising.errorCode}</p>}
     {state.kind === 'idle' && <div className="conversation-analysis-message"><p>Analysis has not been loaded.</p><button type="button" className="transcript-action" onClick={onRetryLoad}>Load analysis</button></div>}
     {state.kind === 'loading' && <div className="conversation-analysis-message" role="status"><span className="conversation-analysis-skeleton" aria-hidden="true"/><span>Loading analysis for this recording…</span></div>}
     {state.kind === 'error' && <div className="conversation-analysis-message" role="alert"><p>{state.message}</p><button type="button" className="transcript-action" onClick={onRetryLoad}>Try loading again</button></div>}
@@ -281,7 +282,7 @@ export function ConversationAnalysisPanel({
       <div className="conversation-analysis-provenance">{analysis.provider} · {analysis.model} · version {analysis.analysisVersion} · completed {new Intl.DateTimeFormat('en-IN', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(analysis.completedAt ?? analysis.updatedAt))}</div>
       {hasUploadedAnalysisAudio(recording) && <button type="button" className="transcript-action" onClick={onReprocessAnalysis} disabled={retrying}>{retrying ? 'Starting…' : 'Reprocess analysis'}</button>}
     </>}
-    {state.kind === 'loaded' && analysis?.state === 'not_started' && <EmptyAnalysisExplanation recording={recording}/>}
+    {state.kind === 'loaded' && analysis?.state === 'not_started' && !analysis.errorMessage && <EmptyAnalysisExplanation recording={recording}/>}
   </section>;
 }
 
