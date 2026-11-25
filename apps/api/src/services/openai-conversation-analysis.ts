@@ -302,7 +302,7 @@ export class OpenAIConversationAnalyzer {
     try {
       const response = await this.client.chat.completions.create({
         model: this.model,
-        temperature: 0,
+        temperature: 1,
         response_format: {
           type: 'json_schema',
           json_schema: { name: 'field_sales_conversation_analysis', strict: true, schema: outputSchema }
