@@ -1,6 +1,8 @@
+import { MAX_TRANSCRIBABLE_RECORDING_SECONDS } from '@itc/domain';
+
 export const SAMPLE_RATE = 16_000;
 export const BYTES_PER_MS = SAMPLE_RATE * 2 / 1000;
-export const MAX_RECORDING_MS = 600_000;
+export const MAX_RECORDING_MS = MAX_TRANSCRIBABLE_RECORDING_SECONDS * 1000;
 const MAX_CLIP_MS = 30_000;
 const MERGE_GAP_MS = 250;
 export const MIN_TRANSCRIBABLE_CLIP_MS = 100;

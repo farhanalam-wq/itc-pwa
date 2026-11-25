@@ -130,6 +130,10 @@ export class DeepFilterSession {
     try {
       const context = (this.options.createContext ?? makeAudioContext)(DEEPFILTER_SAMPLE_RATE);
       this.context = context;
+      context.addEventListener('statechange', () => {
+        if (this.disposed || !this.source || this.currentState !== 'ready' || context.state === 'running') return;
+        void this.fail('context_resume_failed');
+      });
       if (context.sampleRate !== DEEPFILTER_SAMPLE_RATE) return this.fail('context_sample_rate_unsupported');
 
       // Start the context opportunistically while the capture screen is open,

@@ -18,6 +18,7 @@ export interface LocalRecording extends RecordingMetadata {
   uploadRetryable?: boolean;
   lastSyncError?: string;
   incompleteReason?: string;
+  captureDurationSeconds?: number;
   denoisedAudioState?: DenoisedAudioState;
   denoisedAudioFileName?: string;
   denoisedAudioByteLength?: number;

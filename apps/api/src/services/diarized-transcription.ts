@@ -86,7 +86,12 @@ export class DiarizedTranscriptionPipeline {
       const decodedDurationSeconds = pcm.length / (SAMPLE_RATE * 2);
       const toleranceSeconds = Math.max(2, Math.min(5, input.expectedDurationSeconds * 0.05));
       if (Math.abs(decodedDurationSeconds - input.expectedDurationSeconds) > toleranceSeconds) {
-        throw new AudioTranscriptionError('denoised_audio_duration_mismatch', 'The denoised analysis audio duration did not match its registered metadata.');
+        const expected = Math.round(input.expectedDurationSeconds);
+        const decoded = Math.round(decodedDurationSeconds);
+        throw new AudioTranscriptionError(
+          'denoised_audio_duration_mismatch',
+          `Denoised analysis audio is ${decoded} seconds, but the recording is registered as ${expected} seconds. The original recording is preserved. This partial copy cannot be transcribed; record again or provide a complete denoised copy.`
+        );
       }
     }
     const audioSha256 = createHash('sha256').update(pcm).digest('hex');

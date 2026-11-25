@@ -1,5 +1,6 @@
 import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { MAX_TRANSCRIBABLE_RECORDING_SECONDS } from '@itc/domain';
 import { createApiClient } from '@itc/api-client';
 import '@fontsource-variable/hanken-grotesk';
 import { registerFieldServiceWorker } from './pwa/register-service-worker';
@@ -27,6 +28,7 @@ type RecorderState = 'ready' | 'starting' | 'recording' | 'paused' | 'stopping';
 type Notice = { kind: 'info' | 'success' | 'error'; text: string };
 interface ActiveDenoisedCapture {
   recorder: MediaRecorder;
+  intentionalStop: boolean;
   writer?: DenoisedAudioWriter;
   session: DeepFilterSession;
   done: Promise<void>;
@@ -75,6 +77,8 @@ function logDenoiserTelemetry(event: DeepFilterTelemetryEvent): void {
 }
 
 const apiClient = createApiClient({ baseUrl: import.meta.env.VITE_API_BASE_URL || '/api' });
+const FIELD_CAPTURE_STOP_SECONDS = MAX_TRANSCRIBABLE_RECORDING_SECONDS - 10;
+const FIELD_CAPTURE_WARNING_SECONDS = FIELD_CAPTURE_STOP_SECONDS - 20;
 const initialMeter = Array.from({ length: 21 }, (_, index) => 0.18 + (index % 4) * 0.025);
 const support = getOpfsSupport();
 
@@ -182,7 +186,8 @@ function RecordingRow({
   onPlay,
   storageAvailable,
   storageDriver,
-  onRetry
+  onRetry,
+  onDeleteIncomplete
 }: {
   recording: LocalRecording;
   playingId: string | null;
@@ -191,11 +196,13 @@ function RecordingRow({
   storageAvailable: boolean;
   storageDriver?: 'local' | 's3';
   onRetry: (recording: LocalRecording) => void;
+  onDeleteIncomplete: (recording: LocalRecording) => void;
 }) {
   const label = recording.outletName || 'Field recording';
   const localOnly = recording.syncState !== 'uploaded';
   const destination = storageDriver === 's3' ? 'S3' : storageDriver === 'local' ? 'API server' : 'server';
-  const uploadStatus = recording.syncState === 'uploaded' ? `Stored on ${destination}`
+  const uploadStatus = recording.localState === 'incomplete' ? 'Partial · local only'
+    : recording.syncState === 'uploaded' ? `Stored on ${destination}`
     : recording.syncState === 'uploading' ? `Uploading to ${destination}`
       : recording.syncState === 'error' ? 'Upload needs retry'
         : storageAvailable ? `Queued for ${destination}` : 'Storage service unavailable';
@@ -206,7 +213,8 @@ function RecordingRow({
       <div className="row-states"><span className={localOnly ? 'audio-state local' : 'audio-state uploaded'} title={recording.lastSyncError}>{uploadStatus}</span><MetadataState recording={recording}/></div>
       {recording.localState === 'incomplete' && recording.incompleteReason && <p className="row-warning">{recording.incompleteReason}</p>}
       {recording.metadataRegistrationState === 'error' && recording.metadataRegistrationRetryable === false && recording.metadataRegistrationError && <p className="row-warning">{recording.metadataRegistrationError}</p>}
-      {recording.syncState === 'error' && storageAvailable && <button className="retry-upload" type="button" onClick={() => onRetry(recording)}>Retry upload</button>}
+      {recording.localState === 'incomplete' && <button className="delete-incomplete-button" type="button" onClick={() => onDeleteIncomplete(recording)}>Delete partial recording</button>}
+      {recording.localState === 'ready' && recording.syncState === 'error' && storageAvailable && <button className="retry-upload" type="button" onClick={() => onRetry(recording)}>Retry upload</button>}
       {playingId === recording.id && audioUrl && <audio className="audio-player" controls autoPlay src={audioUrl} aria-label={`Audio for ${label}, ${formatDateTime(recording.startedAt)}`} onEnded={() => onPlay(recording)}/>}
     </div>
     {recording.byteLength > 0 && <button className="listen-button" type="button" onClick={() => onPlay(recording)} aria-label={`${playingId === recording.id ? 'Close' : 'Play'} ${label}, ${formatDateTime(recording.startedAt)}`}>
@@ -242,6 +250,8 @@ function FieldApp() {
   const startedAtRef = useRef(0);
   const pausedAtRef = useRef(0);
   const pausedDurationRef = useRef(0);
+  const stopRequestedRef = useRef(false);
+  const stopReasonRef = useRef<'user' | 'limit'>('user');
   const writeErrorRef = useRef<string | null>(null);
   const denoisedStateWriteRef = useRef<Promise<unknown> | null>(null);
   const syncRef = useRef<MetadataRegistrationSyncController | null>(null);
@@ -272,21 +282,22 @@ function FieldApp() {
     const session = createDeepFilterSession({
       onTelemetry: (event) => {
         logDenoiserTelemetry(event);
-        if ((event.type === 'overload' || (event.type === 'load_report' && !event.qualified))) {
-          const capture = denoisedCaptureRef.current;
-          if (capture) {
-            capture.failure = {
-              reason: event.type === 'overload' ? 'DeepFilterNet exceeded its processing load limit.' : 'This device did not meet the denoising performance target.',
-              errorCode: event.type === 'overload' ? 'denoiser_overloaded' : 'denoiser_performance_unqualified',
-              state: 'failed'
-            };
-            setNotice({
-              kind: 'info',
-              text: 'The original recording is safe, but its denoised analysis copy could not be completed. Pyannote will not receive the original audio for this recording.'
-            });
-            if (capture.recorder.state !== 'inactive') capture.recorder.stop();
-          }
-        }
+        const capture = denoisedCaptureRef.current;
+        if (!capture) return;
+        const failure = event.type === 'overload'
+          ? { reason: 'DeepFilterNet exceeded its processing load limit.', errorCode: 'denoiser_overloaded' }
+          : event.type === 'load_report' && !event.qualified
+            ? { reason: 'This device did not meet the denoising performance target.', errorCode: 'denoiser_performance_unqualified' }
+            : event.type === 'fallback' && event.reason === 'context_resume_failed'
+              ? { reason: 'The audio processing context stopped during recording.', errorCode: 'denoiser_audio_context_interrupted' }
+              : undefined;
+        if (!failure) return;
+        capture.failure = { ...failure, state: 'incomplete' };
+        setNotice({
+          kind: 'info',
+          text: 'The original recording is safe, but its denoised analysis copy stopped early and will not be analyzed.'
+        });
+        if (capture.recorder.state !== 'inactive') capture.recorder.stop();
       }
     });
     denoiserSessionRef.current = session;
@@ -416,6 +427,21 @@ function FieldApp() {
   }, [recorderState]);
 
   useEffect(() => {
+    if (recorderState !== 'recording' || elapsed < FIELD_CAPTURE_STOP_SECONDS) return;
+    handleStop('limit');
+  }, [elapsed, recorderState]);
+
+  useEffect(() => {
+    if (recorderState !== 'starting' && recorderState !== 'recording' && recorderState !== 'paused' && recorderState !== 'stopping') return;
+    const warnBeforeLeave = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warnBeforeLeave);
+    return () => window.removeEventListener('beforeunload', warnBeforeLeave);
+  }, [recorderState]);
+
+  useEffect(() => {
     return () => {
       if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
     };
@@ -495,6 +521,13 @@ function FieldApp() {
       return;
     }
 
+    const processedTrack = attached.stream.getAudioTracks()[0];
+    if (!processedTrack || processedTrack.readyState !== 'live') {
+      markUnavailable('The denoised output track was not live when capture started.', 'denoised_output_track_unavailable', 'incomplete');
+      void session.detach();
+      return;
+    }
+
     let recorder: MediaRecorder;
     try {
       if (!mimeType || !MediaRecorder.isTypeSupported(mimeType)) {
@@ -514,6 +547,7 @@ function FieldApp() {
     const done = new Promise<void>((resolve) => { finish = resolve; });
     const capture: ActiveDenoisedCapture = {
       recorder,
+      intentionalStop: false,
       session,
       done,
       finish,
@@ -552,6 +586,16 @@ function FieldApp() {
     };
 
     recorder.addEventListener('dataavailable', (event) => appendChunk(event.data));
+    processedTrack.addEventListener('ended', () => {
+      if (capture.intentionalStop || capture.failure) return;
+      capture.failure = {
+        reason: 'The denoised audio stream ended before recording was stopped.',
+        errorCode: 'denoised_output_track_ended',
+        state: 'incomplete'
+      };
+      setNotice({ kind: 'info', text: 'The original recording is continuing safely, but its denoised copy ended early and will not be analyzed.' });
+      if (recorder.state !== 'inactive') recorder.stop();
+    }, { once: true });
     recorder.addEventListener('error', () => {
       capture.failure = {
         reason: 'The browser could not record the denoised analysis stream.',
@@ -563,6 +607,13 @@ function FieldApp() {
     recorder.addEventListener('stop', () => {
       void (async () => {
         try {
+          if (!capture.intentionalStop && !capture.failure) {
+            capture.failure = {
+              reason: 'The denoised audio recorder stopped unexpectedly.',
+              errorCode: 'denoised_recorder_stopped_early',
+              state: 'incomplete'
+            };
+          }
           await capture.writerReady;
           if (capture.failure) {
             if (capture.writer) await capture.writer.discard(capture.failure.reason, capture.failure.state, capture.failure.errorCode);
@@ -677,6 +728,8 @@ function FieldApp() {
       });
       writerRef.current = writer;
       writeErrorRef.current = null;
+      stopRequestedRef.current = false;
+      stopReasonRef.current = 'user';
       pausedDurationRef.current = 0;
       pausedAtRef.current = 0;
       startedAtRef.current = Date.now();
@@ -685,7 +738,16 @@ function FieldApp() {
       recorderRef.current = recorder;
       recorder.addEventListener('dataavailable', (event) => {
         if (!event.data.size || !writerRef.current) return;
-        void writerRef.current.append(event.data).catch((error) => {
+        const activeWriter = writerRef.current;
+        const checkpointAt = pausedAtRef.current || Date.now();
+        const capturedSeconds = Math.max(0, Math.floor((checkpointAt - startedAtRef.current - pausedDurationRef.current) / 1000));
+        void activeWriter.append(event.data).then(async () => {
+          try {
+            await recordingStore.checkpointCaptureDuration(activeWriter.recording.id, capturedSeconds);
+          } catch {
+            setNotice({ kind: 'info', text: 'Audio is still recording, but recovery progress could not be updated. Keep this screen open until you stop.' });
+          }
+        }).catch((error) => {
           writeErrorRef.current = error instanceof Error ? error.message : 'The audio chunk could not be saved.';
           setNotice({ kind: 'error', text: 'Local storage stopped accepting audio. The recording has been stopped to protect the saved file.' });
           if (recorder.state !== 'inactive') recorder.stop();
@@ -693,9 +755,28 @@ function FieldApp() {
       });
       recorder.addEventListener('stop', () => { void finalizeRecording(); }, { once: true });
       recorder.addEventListener('error', () => {
+        writeErrorRef.current = 'The microphone recorder stopped unexpectedly. The saved audio is being kept as an incomplete recording.';
+        const capture = denoisedCaptureRef.current;
+        if (capture && !capture.failure) {
+          capture.failure = { reason: 'The original microphone recorder failed.', errorCode: 'original_recorder_failed', state: 'incomplete' };
+          if (capture.recorder.state !== 'inactive') capture.recorder.stop();
+        }
         setNotice({ kind: 'error', text: 'The microphone stream ended unexpectedly. Check microphone permission and local storage.' });
         if (recorder.state !== 'inactive') recorder.stop();
       }, { once: true });
+      for (const track of stream.getAudioTracks()) {
+        track.addEventListener('ended', () => {
+          if (stopRequestedRef.current || recorder.state === 'inactive') return;
+          writeErrorRef.current = 'The microphone ended before recording was stopped. The saved audio is incomplete.';
+          const capture = denoisedCaptureRef.current;
+          if (capture && !capture.failure) {
+            capture.failure = { reason: 'The microphone ended before recording was stopped.', errorCode: 'microphone_track_ended', state: 'incomplete' };
+            if (capture.recorder.state !== 'inactive') capture.recorder.stop();
+          }
+          setNotice({ kind: 'error', text: 'The microphone disconnected. The saved original is being kept as an incomplete recording.' });
+          try { recorder.stop(); } catch { /* The recorder may already have stopped with the track. */ }
+        }, { once: true });
+      }
       recorder.start(1000);
       setRecorderState('recording');
       if (denoiserReadyAtTap
@@ -753,6 +834,9 @@ function FieldApp() {
   async function finalizeRecording() {
     const writer = writerRef.current;
     if (!writer) return;
+    if (!stopRequestedRef.current && !writeErrorRef.current) {
+      writeErrorRef.current = 'The recording stopped unexpectedly. The available original audio is being kept as incomplete.';
+    }
     const stopTime = pausedAtRef.current || Date.now();
     const durationSeconds = Math.max(0, Math.floor((stopTime - startedAtRef.current - pausedDurationRef.current) / 1000));
     streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -764,6 +848,7 @@ function FieldApp() {
     try {
       const denoisedCapture = denoisedCaptureRef.current;
       if (denoisedCapture) {
+        denoisedCapture.intentionalStop = stopRequestedRef.current;
         if (denoisedCapture.recorder.state !== 'inactive') denoisedCapture.recorder.stop();
         await denoisedCapture.done;
       }
@@ -775,7 +860,9 @@ function FieldApp() {
         setNotice({ kind: 'error', text: 'No audio was captured. Check microphone permission and try again.' });
       } else {
         saved = true;
-        setNotice({ kind: 'success', text: 'Recording saved on this phone. Find it in History.' });
+        setNotice({ kind: 'success', text: stopReasonRef.current === 'limit'
+          ? `Recording stopped at ${formatElapsed(FIELD_CAPTURE_STOP_SECONDS).slice(1).join(':')} to stay within the transcription limit. The original was saved on this phone.`
+          : 'Recording saved on this phone. Find it in History.' });
       }
     } catch (error) {
       await recordingStore.recoverInterrupted().catch(() => undefined);
@@ -784,6 +871,8 @@ function FieldApp() {
       recorderRef.current = null;
       writerRef.current = null;
       pausedAtRef.current = 0;
+      stopRequestedRef.current = false;
+      stopReasonRef.current = 'user';
       setRecorderState('ready');
       void refreshLocalState();
     }
@@ -815,11 +904,17 @@ function FieldApp() {
     if (streamRef.current) void startMeter(streamRef.current);
   }
 
-  function handleStop() {
+  function handleStop(reason: 'user' | 'limit' = 'user') {
     const recorder = recorderRef.current;
-    if (!recorder || recorder.state === 'inactive') return;
+    if (!recorder || recorder.state === 'inactive' || stopRequestedRef.current) return;
+    stopRequestedRef.current = true;
+    stopReasonRef.current = reason;
+    if (reason === 'limit') {
+      setNotice({ kind: 'info', text: 'This recording reached the supported transcription length and is stopping safely.' });
+    }
     setRecorderState('stopping');
     const denoisedRecorder = denoisedCaptureRef.current?.recorder;
+    if (denoisedCaptureRef.current) denoisedCaptureRef.current.intentionalStop = true;
     if (denoisedRecorder && denoisedRecorder.state !== 'inactive') denoisedRecorder.stop();
     recorder.stop();
   }
@@ -855,6 +950,24 @@ function FieldApp() {
     }
   }
 
+  async function handleDiscardIncomplete(recording: LocalRecording) {
+    if (recording.localState !== 'incomplete') return;
+    const label = recording.outletName || 'this recording';
+    if (!window.confirm(`Delete the incomplete audio for ${label} from this phone? This cannot be undone.`)) return;
+    try {
+      await recordingStore.delete(recording.id);
+      await refreshLocalState();
+      setRecovery((current) => current ? ({
+        ...current,
+        items: current.items.filter((item) => item.id !== recording.id),
+        incompleteCount: Math.max(0, current.incompleteCount - 1)
+      }) : current);
+      setNotice({ kind: 'success', text: 'Incomplete recording deleted from this phone.' });
+    } catch (error) {
+      setNotice({ kind: 'error', text: error instanceof Error ? error.message : 'The incomplete recording could not be deleted.' });
+    }
+  }
+
   const connectionLabel = !online ? 'Offline' : apiHealth ? 'Online' : 'Sync unavailable';
   const storageDriver = apiHealth?.runtime.storageDriver;
   const storageAvailable = storageDriver === 'local' || storageDriver === 's3';
@@ -870,7 +983,7 @@ function FieldApp() {
       </a>
       <nav className="bottom-nav" aria-label="Primary navigation">
         <button type="button" className={screen === 'capture' ? 'active' : ''} aria-current={screen === 'capture' ? 'page' : undefined} onClick={() => setScreen('capture')}><Icon name="record"/>Record</button>
-        <button type="button" className={screen === 'history' ? 'active' : ''} aria-current={screen === 'history' ? 'page' : undefined} onClick={() => setScreen('history')}><Icon name="history"/>History</button>
+        <button type="button" className={screen === 'history' ? 'active' : ''} aria-current={screen === 'history' ? 'page' : undefined} disabled={recorderState !== 'ready'} onClick={() => setScreen('history')}><Icon name="history"/>History</button>
       </nav>
       <span className={`connection ${online ? 'connected' : 'disconnected'}`}><i/>{connectionLabel}</span>
     </header>
@@ -902,6 +1015,7 @@ function FieldApp() {
         <section className={`recorder-panel ${recorderState === 'recording' ? 'is-recording' : ''} ${recorderState === 'paused' ? 'is-paused' : ''}`} aria-label="Recording controls">
           <div className="recorder-head"><span className={`recorder-state state-${recorderState}`} role="status"><i/>{recorderState === 'starting' ? 'Starting' : recorderState === 'recording' ? 'Recording' : recorderState === 'paused' ? 'Paused' : recorderState === 'stopping' ? 'Saving' : 'Ready'}</span></div>
           <div className="timer" aria-label={`Elapsed time ${hours}:${minutes}:${seconds}`}><span className="timer-tile">{hours}</span><span className="timer-separator">:</span><span className="timer-tile">{minutes}</span><span className="timer-separator">:</span><span className="timer-tile">{seconds}</span></div>
+          {(recorderState === 'recording' || recorderState === 'paused') && elapsed >= FIELD_CAPTURE_WARNING_SECONDS && <p className="capture-limit-warning" role="status">Transcription supports up to 10 minutes. Recording will stop at 9:50 to leave a safety margin.</p>}
           <div className="level-meter" aria-label={recorderState === 'recording' ? 'Microphone audio level' : 'Audio level meter'}>
             {meterLevels.map((level, index) => <i key={index} style={{ height: `${Math.round(level * 34)}px` }}/>) }
           </div>
@@ -910,7 +1024,7 @@ function FieldApp() {
               {recorderState === 'paused'
                 ? <button type="button" onClick={handleResume}><Icon name="play"/>Resume</button>
                 : <button type="button" onClick={handlePause}><Icon name="pause"/>Pause</button>}
-              <button type="button" onClick={handleStop}><Icon name="stop"/>Stop recording</button>
+              <button type="button" onClick={() => handleStop()}><Icon name="stop"/>Stop recording</button>
             </div>
           ) : (
             <>
@@ -927,7 +1041,7 @@ function FieldApp() {
       </div> : <section className="history-screen">
         <div className="history-title"><div><h1>Recording history</h1><p>Audio saved on this phone.</p></div><span className="history-total">{displayRecords.length}</span></div>
         <StorageBreakdown snapshot={storage}/>
-        {displayRecords.length ? <div className="full-history">{displayRecords.map((recording) => <RecordingRow key={recording.id} recording={recording} playingId={playingId} audioUrl={audioUrl} onPlay={(item) => { void handlePlay(item); }} storageAvailable={storageAvailable} storageDriver={storageDriver} onRetry={(item) => { void handleRetryUpload(item); }}/>)}</div>
+        {displayRecords.length ? <div className="full-history">{displayRecords.map((recording) => <RecordingRow key={recording.id} recording={recording} playingId={playingId} audioUrl={audioUrl} onPlay={(item) => { void handlePlay(item); }} storageAvailable={storageAvailable} storageDriver={storageDriver} onRetry={(item) => { void handleRetryUpload(item); }} onDeleteIncomplete={(item) => { void handleDiscardIncomplete(item); }}/>)}</div>
         : <div className="empty-screen"><span className="empty-icon"><Icon name="history"/></span><h2>No recordings yet</h2><p>Start a recording to save it here.</p><button className="text-button" type="button" onClick={() => setScreen('capture')}>Return to capture</button></div>}
         {recovery?.items.length ? <div className="recovery-note"><strong>Interrupted captures</strong>{recovery.items.map((item) => <p key={item.id}>{item.message}</p>)}</div> : null}
         <div className="history-footnote"><strong>Media upload</strong><span>{storageAvailable ? `Audio syncs to ${storageDestination} after the device comes online; one local OPFS copy stays on this device.` : `${uploadLabel}. Recordings stay in OPFS until the API is reachable.`}</span><strong>Conversation analysis</strong><span>{apiHealth?.runtime.analysis === 'not-configured' ? 'Transcription is not configured.' : 'Transcription status appears after audio is stored.'}</span></div>

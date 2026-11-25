@@ -8,6 +8,7 @@ export type SentimentCue = 'positive' | 'neutral' | 'hesitant' | 'at_risk' | 'un
 export type InsightExplicitness = 'explicit' | 'inferred' | 'uncertain';
 export type DenoisingState = 'not_started' | 'initializing' | 'processing' | 'ready' | 'failed' | 'unsupported' | 'incomplete';
 export type ConversationAnalysisState = 'not_started' | 'queued' | 'processing' | 'completed' | 'failed';
+export const MAX_TRANSCRIBABLE_RECORDING_SECONDS = 600;
 export type InsightCategory =
   | 'demand'
   | 'objection'

@@ -255,6 +255,7 @@ export class RecordingStore {
       return updateLocalRecording(recordingId, (current) => ({
         ...current,
         durationSeconds,
+        captureDurationSeconds: undefined,
         byteLength: file.size,
         localState: 'ready',
         metadataRegistrationState: current.consentRecordedAt ? 'queued' : 'not_ready',
@@ -332,6 +333,15 @@ export class RecordingStore {
         }));
       }
     );
+  }
+
+  async checkpointCaptureDuration(id: string, durationSeconds: number): Promise<void> {
+    const duration = Math.max(0, Math.floor(durationSeconds));
+    await updateLocalRecording(id, (current) => current.localState !== 'recording' ? current : ({
+      ...current,
+      captureDurationSeconds: Math.max(current.captureDurationSeconds ?? 0, duration),
+      updatedAt: nowIso()
+    }));
   }
 
   async markDenoisedAudioUnavailable(
@@ -568,6 +578,7 @@ export class RecordingStore {
           await updateLocalRecording(recording.id, (current) => ({
             ...current,
             localState: 'incomplete',
+            durationSeconds: current.captureDurationSeconds ?? current.durationSeconds,
             denoisedAudioState: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? 'incomplete' : current.denoisedAudioState,
             denoisedAudioFileName: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? undefined : current.denoisedAudioFileName,
             denoisedAudioMimeType: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? undefined : current.denoisedAudioMimeType,
@@ -595,6 +606,7 @@ export class RecordingStore {
         await updateLocalRecording(recording.id, (current) => ({
           ...current,
           localState: 'incomplete',
+          durationSeconds: current.captureDurationSeconds ?? current.durationSeconds,
           denoisedAudioState: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? 'incomplete' : current.denoisedAudioState,
           denoisedAudioFileName: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? undefined : current.denoisedAudioFileName,
           denoisedAudioMimeType: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? undefined : current.denoisedAudioMimeType,
@@ -612,6 +624,7 @@ export class RecordingStore {
         await updateLocalRecording(recording.id, (current) => ({
           ...current,
           localState: 'incomplete',
+          durationSeconds: current.captureDurationSeconds ?? current.durationSeconds,
           denoisedAudioState: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? 'incomplete' : current.denoisedAudioState,
           denoisedAudioFileName: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? undefined : current.denoisedAudioFileName,
           denoisedAudioMimeType: current.denoisedAudioState === 'processing' || current.denoisedAudioState === 'ready' ? undefined : current.denoisedAudioMimeType,

@@ -88,6 +88,7 @@ input { caret-color: var(--green); }
 .timer { margin: 13px 0 9px; display: flex; align-items: center; justify-content: center; gap: 6px; }
 .timer-tile { width: 64px; height: 52px; display: grid; place-items: center; border-radius: 6px; color: white; background: #27352d; font-size: 31px; font-weight: 600; letter-spacing: -.045em; line-height: 1; }
 .timer-separator { color: #87948a; font-size: 21px; font-weight: 550; }
+.capture-limit-warning { margin: 0 0 10px; padding: 8px 9px; border: 1px solid #a88654; border-radius: 6px; color: #f3d29b; background: #392f22; font-size: 11px; line-height: 1.4; }
 .level-meter { height: 36px; margin: 0 0 10px; display: flex; align-items: center; justify-content: center; gap: 3px; }
 .level-meter i { width: 3px; min-height: 4px; max-height: 33px; display: block; flex: none; border-radius: 3px; background: #70927b; transition: height .11s linear; }
 .level-meter i:nth-child(3n) { background: var(--lime); }
@@ -132,6 +133,8 @@ input { caret-color: var(--green); }
 .metadata-state.failed { color: #914d32; }
 .retry-upload { min-height: 28px; margin-top: 5px; padding: 0 8px; border: 1px solid #d7b995; border-radius: 5px; color: #70451c; background: #fff5e8; font-size: 9px; font-weight: 680; }
 .retry-upload:hover { background: #f9e8d2; }
+.delete-incomplete-button { min-height: 32px; margin-top: 6px; padding: 0 10px; border: 1px solid #cda991; border-radius: 6px; color: #75432a; background: #fff7f0; font-size: 11px; font-weight: 650; }
+.delete-incomplete-button:hover { background: #f9e8d2; }
 .listen-button { min-width: 47px; min-height: 34px; padding: 0 5px; display: inline-flex; flex: none; flex-direction: column; align-items: center; justify-content: center; gap: 1px; border: 0; color: var(--green); background: transparent; font-size: 9px; font-weight: 650; }
 .listen-button svg { width: 15px; height: 15px; }
 .row-warning { margin: 6px 0 0; color: #84492c; font-size: 9px; line-height: 1.4; }
@@ -156,6 +159,7 @@ input { caret-color: var(--green); }
 .storage-prompt { margin-top: 8px; min-height: 44px; padding: 0 7px; border: 1px solid #c9d5c6; border-radius: 6px; color: #426145; background: #f5f8f1; font-size: 12px; font-weight: 650; white-space: nowrap; }
 .bottom-nav { position: fixed; z-index: 5; right: 0; bottom: 0; left: 0; width: min(520px, 100%); height: calc(62px + env(safe-area-inset-bottom)); margin: 0 auto; padding: 4px 40px env(safe-area-inset-bottom); display: grid; grid-template-columns: 1fr 1fr; align-items: center; border-top: 1px solid var(--line); background: rgba(255,255,255,.98); }
 .bottom-nav button { min-height: 48px; padding: 3px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; border: 0; color: #758178; background: transparent; font-size: 9px; font-weight: 600; }
+.bottom-nav button:disabled { cursor: not-allowed; opacity: .48; }
 .bottom-nav button svg { width: 18px; height: 18px; }
 .bottom-nav button.active { color: var(--green); font-weight: 750; }
 .bottom-nav button.active::after { width: 18px; height: 2px; content: ''; border-radius: 2px; background: currentColor; }
