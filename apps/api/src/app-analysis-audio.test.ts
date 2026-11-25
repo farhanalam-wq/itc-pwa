@@ -90,6 +90,24 @@ test('raw upload never queues Pyannote; denoised analysis artifact completion do
     expect(denoisedDownload.status).toBe(200);
     expect((await denoisedDownload.json()).objectKey).toBe(saved.denoisedAnalysisAudio?.objectKey);
 
+    // Synthetic short recording whose cleanup was interrupted: original is stored,
+    // but this must not claim that a sales model job failed or offer a false result.
+    const incompleteResponse = await app.handle('/v1/visits/visit-1/recordings', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        id: 'short-recording', startedAt: '2026-11-22T10:00:00.000Z', durationSeconds: 11,
+        mimeType: 'audio/webm', byteLength: rawBytes.length,
+        denoisedAnalysisAudio: { state: 'incomplete', errorCode: 'denoiser_qualification_pending' }
+      })
+    });
+    expect(incompleteResponse.status).toBe(201);
+    expect((await incompleteResponse.json()).conversationAnalysisState).toBe('not_started');
+    await putChunk('/v1/recordings/short-recording/audio/0/1', rawBytes);
+    expect((await app.handle('/v1/recordings/short-recording/audio/complete', { method: 'POST' })).status).toBe(200);
+    const blockedAnalysis = await app.handle('/v1/recordings/short-recording/conversation-analysis', { headers });
+    expect(blockedAnalysis.status).toBe(200);
+    expect(await blockedAnalysis.json()).toMatchObject({ state: 'not_started', errorCode: 'denoised_audio_unavailable' });
+
     const denoisedPlayback = await app.handle('/v1/recordings/recording-1/audio?artifact=denoised', { headers });
     expect(denoisedPlayback.status).toBe(200);
     expect(denoisedPlayback.headers.get('content-type')).toBe('audio/webm');

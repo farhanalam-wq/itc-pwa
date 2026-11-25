@@ -267,3 +267,11 @@ export interface ManualTranscriptAnalysis {
   insights: ManualTranscriptInsight[];
   coachingSignals: ManualTranscriptCoachingSignal[];
 }
+
+/** True only when the complete denoised analysis artifact is durably stored. */
+export function hasUploadedAnalysisAudio(recording: RecordingMetadata): boolean {
+  const audio = recording.denoisedAnalysisAudio;
+  return Boolean(audio?.state === 'ready' && audio.syncState === 'uploaded'
+    && audio.sampleRateHz === 48_000 && audio.objectKey && audio.sha256
+    && audio.durationSeconds && audio.durationSeconds > 0);
+}

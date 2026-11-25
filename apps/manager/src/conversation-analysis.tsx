@@ -1,3 +1,4 @@
+import { hasUploadedAnalysisAudio } from '@itc/domain';
 import type {
   ConversationAnalysisReport,
   InsightEvidence,
@@ -170,7 +171,7 @@ export function ConversationAnalysisPanel({
   return <section className="conversation-analysis-panel" aria-label="Production conversation analysis" aria-live="polite">
     <div className="conversation-analysis-heading">
       <div><h3>Real recording analysis</h3><p>Production analysis · original recording retained</p></div>
-      {analysis && <span className={`conversation-analysis-status status-${analysis.state}`}>{analysis.state}</span>}
+      {analysis && hasUploadedAnalysisAudio(recording) && <span className={`conversation-analysis-status status-${analysis.state}`}>{analysis.state}</span>}
     </div>
     {denoising && <p className={`conversation-denoising-state denoising-${denoising.state}`}>
       <strong>Audio preparation:</strong> {denoising.state === 'ready'
@@ -182,10 +183,11 @@ export function ConversationAnalysisPanel({
     {state.kind === 'error' && <div className="conversation-analysis-message" role="alert"><p>{state.message}</p><button type="button" className="transcript-action" onClick={onRetryLoad}>Try loading again</button></div>}
     {analysis?.state === 'queued' && <p className="conversation-analysis-message" role="status">Diarization and transcription are complete. The sales analysis is waiting to run.</p>}
     {analysis?.state === 'processing' && <p className="conversation-analysis-message" role="status">Extracting evidence-backed visit outcomes and sales signals…</p>}
+    {analysis?.state === 'not_started' && analysis.errorMessage && <p className="conversation-analysis-message" role="status">{analysis.errorMessage}</p>}
     {analysis?.state === 'failed' && <div className="conversation-analysis-message" role="alert">
       <p>{analysis.errorMessage ?? 'Conversation analysis failed. The original recording and transcript remain available.'}</p>
-      {analysis.retryable && <button type="button" className="transcript-action" onClick={onRetryAnalysis} disabled={retrying}>{retrying ? 'Retrying…' : 'Retry analysis'}</button>}
-      <button type="button" className="transcript-action" onClick={onReprocessAnalysis} disabled={retrying}>{retrying ? 'Starting…' : 'Reprocess analysis'}</button>
+      {hasUploadedAnalysisAudio(recording) && analysis.retryable && <button type="button" className="transcript-action" onClick={onRetryAnalysis} disabled={retrying}>{retrying ? 'Retrying…' : 'Retry analysis'}</button>}
+      {hasUploadedAnalysisAudio(recording) && <button type="button" className="transcript-action" onClick={onReprocessAnalysis} disabled={retrying}>{retrying ? 'Starting…' : 'Reprocess analysis'}</button>}
     </div>}
     {analysis?.state === 'completed' && <>
       <div className="conversation-outcome">
@@ -277,7 +279,7 @@ export function ConversationAnalysisPanel({
       </section>}
 
       <div className="conversation-analysis-provenance">{analysis.provider} · {analysis.model} · version {analysis.analysisVersion} · completed {new Intl.DateTimeFormat('en-IN', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(analysis.completedAt ?? analysis.updatedAt))}</div>
-      <button type="button" className="transcript-action" onClick={onReprocessAnalysis} disabled={retrying}>{retrying ? 'Starting…' : 'Reprocess analysis'}</button>
+      {hasUploadedAnalysisAudio(recording) && <button type="button" className="transcript-action" onClick={onReprocessAnalysis} disabled={retrying}>{retrying ? 'Starting…' : 'Reprocess analysis'}</button>}
     </>}
     {state.kind === 'loaded' && analysis?.state === 'not_started' && <EmptyAnalysisExplanation recording={recording}/>}
   </section>;

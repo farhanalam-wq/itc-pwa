@@ -35,6 +35,7 @@ function makeContext(sampleRate = DEEPFILTER_SAMPLE_RATE) {
   let state: AudioContextState = 'running';
   const context = {
     sampleRate,
+    addEventListener: () => undefined,
     get state() { return state; },
     resume: async () => { state = 'running'; },
     suspend: async () => { state = 'suspended'; },

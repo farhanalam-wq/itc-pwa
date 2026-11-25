@@ -516,7 +516,7 @@ export function createApp(
     if (existing) return existing;
     if (recording.syncState === 'uploaded' && !recording.denoisedAnalysisAudio?.objectKey) {
       const unavailable = emptyConversationAnalysis(recordingId, OPENAI_CONVERSATION_ANALYSIS_MODEL, CONVERSATION_ANALYSIS_VERSION);
-      return { ...unavailable, state: 'failed', errorCode: 'denoised_audio_unavailable', errorMessage: 'Denoised analysis audio is unavailable. The original recording was not sent to Pyannote.' };
+      return { ...unavailable, errorCode: 'denoised_audio_unavailable', errorMessage: 'Analysis is unavailable because no complete denoised audio copy was uploaded. The original recording is available to listen to. Reprocessing cannot restore the missing copy.' };
     }
     return emptyConversationAnalysis(recordingId, OPENAI_CONVERSATION_ANALYSIS_MODEL, CONVERSATION_ANALYSIS_VERSION);
   };

@@ -135,7 +135,7 @@ export class MongoRecordingRepository implements RecordingRepository {
       byteLength: input.byteLength,
       syncState: 'queued',
       analysisState: 'not_started',
-      conversationAnalysisState: input.denoisedAnalysisAudio && input.denoisedAnalysisAudio.state !== 'ready' ? 'failed' : 'not_started',
+      conversationAnalysisState: 'not_started',
       ...(input.denoisedAnalysisAudio ? {
         denoisedAnalysisAudio: {
           ...input.denoisedAnalysisAudio,

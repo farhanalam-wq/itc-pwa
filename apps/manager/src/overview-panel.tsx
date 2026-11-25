@@ -1,3 +1,4 @@
+import { hasUploadedAnalysisAudio } from '@itc/domain';
 import type { DemoConversation } from '@itc/demo-data';
 import type { RecordingMetadata, SyncState } from '@itc/domain';
 import { ConversationAnalysisReportPanel, type ConversationAnalysisReportState } from './conversation-analysis';
@@ -186,7 +187,7 @@ export function OverviewPanel({
           <time dateTime={capture.startedAt}>{formatDateTime(capture.startedAt)}</time>
           <span className={`overview-sync-state sync-${capture.syncState}`}>{syncLabels[capture.syncState]}</span>
           <span className={`overview-analysis-state analysis-${capture.analysisState}`}>{capture.analysisState === 'not_started' ? 'Transcript not started' : capture.analysisState === 'ready' ? 'Transcript ready' : capture.analysisState === 'error' ? 'Transcription failed' : capture.analysisState === 'transcribing' ? 'Transcribing' : 'Analyzing audio'}</span>
-          {capture.conversationAnalysisState && <span className={`overview-analysis-state conversation-state-${capture.conversationAnalysisState}`}>{conversationAnalysisLabels[capture.conversationAnalysisState]}</span>}
+          {capture.conversationAnalysisState && <span className={`overview-analysis-state conversation-state-${capture.conversationAnalysisState}`}>{!hasUploadedAnalysisAudio(capture) ? 'Sales analysis unavailable' : conversationAnalysisLabels[capture.conversationAnalysisState]}</span>}
         </article>)}
       </div> : captureState === 'unavailable'
         ? <p className="overview-empty" role="status">The capture API is unavailable. Start or refresh the API to check device sync status.</p>

@@ -618,22 +618,9 @@ function FieldApp() {
           if (capture.failure) {
             if (capture.writer) await capture.writer.discard(capture.failure.reason, capture.failure.state, capture.failure.errorCode);
             else await recordingStore.markDenoisedAudioUnavailable(recordingId, capture.failure.reason, capture.failure.state, capture.failure.errorCode);
-          } else if (session.qualificationState !== 'qualified') {
-            if (capture.writer) {
-              await capture.writer.discard(
-                'Device performance qualification did not complete before this recording stopped.',
-                'incomplete',
-                'denoiser_qualification_pending'
-              );
-            } else {
-              await recordingStore.markDenoisedAudioUnavailable(
-                recordingId,
-                'Device performance qualification did not complete before this recording stopped.',
-                'incomplete',
-                'denoiser_qualification_pending'
-              );
-            }
           } else if (capture.writer) {
+            // Qualification is device telemetry, not proof that a short capture is incomplete.
+            // Runtime overload, recorder, and context failures are handled above.
             await capture.writer.finalize();
           }
         } catch (error) {
@@ -839,8 +826,6 @@ function FieldApp() {
     }
     const stopTime = pausedAtRef.current || Date.now();
     const durationSeconds = Math.max(0, Math.floor((stopTime - startedAtRef.current - pausedDurationRef.current) / 1000));
-    streamRef.current?.getTracks().forEach((track) => track.stop());
-    streamRef.current = null;
     stopMeter();
     setRecorderState('stopping');
 
@@ -868,6 +853,8 @@ function FieldApp() {
       await recordingStore.recoverInterrupted().catch(() => undefined);
       setNotice({ kind: 'error', text: `Could not save the recording. Check History for any recovered audio. ${error instanceof Error ? error.message : ''}`.trim() });
     } finally {
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
       recorderRef.current = null;
       writerRef.current = null;
       pausedAtRef.current = 0;
